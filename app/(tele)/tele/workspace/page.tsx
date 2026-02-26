@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { StatusBadge } from "@/components/status-badge";
 
 /** (tạm) normalize giống importer */
 function normalizeVNPhone(input?: string | null) {
@@ -385,9 +386,7 @@ export default function TeleWorkspacePage() {
               >
                 <div className="flex items-center justify-between gap-2">
                   <div className="font-medium line-clamp-1">{name}</div>
-                  <Badge variant={c.current_status === "ASSIGNED" ? "default" : "secondary"}>
-                    {c.current_status}
-                  </Badge>
+                  <StatusBadge status={c.current_status} />
                 </div>
 
                 <div className="text-xs opacity-70 mt-1">
