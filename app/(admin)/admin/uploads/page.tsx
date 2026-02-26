@@ -10,53 +10,65 @@ import { buildNormalizedPhone } from "@/lib/crm/phone";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { StatusBadge } from "@/components/status-badge";
+
+type CampaignStatus = "RUNNING" | "PAUSE" | "COMPLETED" | "DONE";
 
 type Upload = {
   id: string;
   campaign_name: string;
   created_at: string;
   total_rows: number;
-  status: string;
+  status: CampaignStatus;
 };
 
 type Row = Record<string, any>;
 
 function parseFile(file: File): Promise<Row[]> {
   const ext = file.name.split(".").pop()?.toLowerCase();
+
   if (ext === "csv") {
     return new Promise((resolve, reject) => {
       Papa.parse(file, {
         header: true,
         skipEmptyLines: true,
-        complete: (res) => resolve((res.data as any[]) ?? []),
+        complete: (res) => resolve(((res.data as any[]) ?? []) as Row[]),
         error: (e) => reject(e),
       });
     });
   }
 
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const data = new Uint8Array(reader.result as ArrayBuffer);
-      const wb = XLSX.read(data, { type: "array" });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const json = XLSX.utils.sheet_to_json(ws, { defval: "" }) as Row[];
-      resolve(json);
-    };
-    reader.onerror = reject;
-    reader.readAsArrayBuffer(file);
-  });
+  if (ext === "xlsx" || ext === "xls") {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = new Uint8Array(reader.result as ArrayBuffer);
+          const wb = XLSX.read(data, { type: "array" });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const json = XLSX.utils.sheet_to_json(ws, { defval: "" }) as Row[];
+          resolve(json);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  return Promise.reject(new Error("Unsupported file type. Use .csv, .xlsx, or .xls"));
 }
 
 function normalizeRow(r: Row): Row {
   const out: Row = {};
-  for (const [k, v] of Object.entries(r)) out[k.trim().toLowerCase()] = v;
+  for (const [k, v] of Object.entries(r)) out[String(k).trim().toLowerCase()] = v;
   return out;
 }
 
 function pick(r: Row, keys: string[]) {
   for (const k of keys) {
-    const v = r[k.trim().toLowerCase()];
+    const v = r[String(k).trim().toLowerCase()];
     if (v !== undefined) return v;
   }
   return undefined;
@@ -65,7 +77,8 @@ function pick(r: Row, keys: string[]) {
 function parseImportDate(raw: any): Date | null {
   if (raw === null || raw === undefined || raw === "") return null;
 
-  if (typeof raw === "number") {
+  // Excel serial date
+  if (typeof raw === "number" && isFinite(raw)) {
     const utc = Math.round((raw - 25569) * 86400 * 1000);
     const d = new Date(utc);
     return isNaN(d.getTime()) ? null : d;
@@ -101,7 +114,7 @@ export default function AdminUploadsPage() {
       .order("created_at", { ascending: false });
 
     if (error) console.error(error);
-    setUploads((data as any) ?? []);
+    setUploads(((data as any) ?? []) as Upload[]);
   };
 
   useEffect(() => {
@@ -121,10 +134,14 @@ export default function AdminUploadsPage() {
       setLog("Parsing file...");
       const rows = await parseFile(file);
 
+      if (!rows.length) throw new Error("File has no data rows.");
+
       setLog(`Creating upload record... (${rows.length} rows)`);
+
       const { data: sess } = await supabase.auth.getSession();
       const uid = sess.session?.user.id ?? null;
 
+      // ✅ Use enum-valid status: RUNNING
       const { data: upload, error: upErr } = await supabase
         .from("uploads")
         .insert({
@@ -132,16 +149,15 @@ export default function AdminUploadsPage() {
           filename: file.name,
           uploaded_by: uid,
           total_rows: rows.length,
-          status: "IMPORTING",
+          status: "RUNNING" satisfies CampaignStatus,
         })
         .select("id")
         .single();
 
       if (upErr) throw upErr;
-
       uploadId = upload.id as string;
 
-      // Map rows
+      // Map rows -> contacts payload
       const mapped = rows.map((r, idx) => {
         const rr = normalizeRow(r);
 
@@ -149,11 +165,13 @@ export default function AdminUploadsPage() {
         const cc = pick(rr, ["mobile country code", "mobile_country_code"]);
         const mn = pick(rr, ["mobile number", "mobile_number"]);
 
-        const normalized_phone = buildNormalizedPhone(
+        const normalized = buildNormalizedPhone(
           tel ? String(tel) : "",
           cc ? String(cc) : "",
           mn ? String(mn) : ""
         );
+
+        const normalized_phone = normalized && String(normalized).trim() ? String(normalized).trim() : null;
 
         const rawDate = pick(rr, ["date", "import date", "import_date"]);
         const import_date = parseImportDate(rawDate);
@@ -186,9 +204,10 @@ export default function AdminUploadsPage() {
         };
       });
 
-      // Batch insert
+      // Batch insert contacts
       const chunkSize = 500;
       const totalChunks = Math.ceil(mapped.length / chunkSize);
+
       setLog(`Inserting contacts in chunks of ${chunkSize}...`);
 
       for (let i = 0; i < mapped.length; i += chunkSize) {
@@ -196,12 +215,24 @@ export default function AdminUploadsPage() {
         const chunk = mapped.slice(i, i + chunkSize);
 
         const { error } = await supabase.from("contacts").insert(chunk);
-        if (error) throw new Error(`Insert failed at chunk ${chunkIndex}/${totalChunks}: ${error.message}`);
+        if (error) {
+          throw new Error(`Insert failed at chunk ${chunkIndex}/${totalChunks}: ${error.message}`);
+        }
 
-        setLog(`Inserted ${Math.min(i + chunkSize, mapped.length)}/${mapped.length} (chunk ${chunkIndex}/${totalChunks})`);
+        setLog(
+          `Inserted ${Math.min(i + chunkSize, mapped.length)}/${mapped.length} (chunk ${chunkIndex}/${totalChunks})`
+        );
       }
 
-      await supabase.from("uploads").update({ status: "DONE" }).eq("id", uploadId);
+      // ✅ Let backend be source of truth for status
+      // Call refresh_upload_status(uploadId) if exists; otherwise triggers should handle.
+      setLog("Refreshing upload status...");
+      const { error: refreshErr } = await supabase.rpc("refresh_upload_status", { p_upload_id: uploadId });
+      if (refreshErr) {
+        // Not fatal; you may rely on triggers. But log it for debugging.
+        console.warn("refresh_upload_status rpc failed:", refreshErr);
+        setLog((prev) => prev + `\n⚠ refresh_upload_status failed: ${refreshErr.message}\n(Triggers may still update status)`);
+      }
 
       setLog("Done ✅");
       await load();
@@ -210,8 +241,9 @@ export default function AdminUploadsPage() {
       console.error(e);
       setLog(`Failed ❌\n${e?.message ?? String(e)}`);
 
+      // ✅ enum-valid "failed" fallback: PAUSE
       if (uploadId) {
-        await supabase.from("uploads").update({ status: "FAILED" }).eq("id", uploadId);
+        await supabase.from("uploads").update({ status: "PAUSE" }).eq("id", uploadId);
       }
 
       alert(e?.message ?? "Import failed");
@@ -246,28 +278,72 @@ export default function AdminUploadsPage() {
           </Button>
 
           {log && <div className="text-sm opacity-80 whitespace-pre-wrap">{log}</div>}
-
         </CardContent>
       </Card>
 
-      <div className="space-y-2">
-        <div className="text-lg font-semibold">Recent Uploads</div>
-        <div className="grid md:grid-cols-2 gap-3">
-          {uploads.map((u) => (
-            <Link key={u.id} href={`/admin/uploads/${u.id}`}>
-              <Card className="hover:shadow-md transition">
-                <CardHeader>
-                  <CardTitle className="text-base">{u.campaign_name}</CardTitle>
-                </CardHeader>
-                <CardContent className="text-sm opacity-80">
-                  Rows: {u.total_rows} • Status: {u.status}
-                  <br />
-                  {new Date(u.created_at).toLocaleString()}
-                </CardContent>
-              </Card>
-            </Link>
-          ))}
+      {/* Recent Uploads */}
+      <div className="space-y-3">
+        <div className="flex items-end justify-between">
+          <div>
+            <div className="text-lg font-semibold">Recent Uploads</div>
+            <div className="text-sm opacity-70">
+              {uploads.length ? `Showing ${uploads.length} latest campaigns` : "No campaigns yet"}
+            </div>
+          </div>
         </div>
+
+        {uploads.length === 0 ? (
+          <Card>
+            <CardContent className="py-10 text-center text-sm opacity-70">
+              No uploads yet. Import your first campaign above.
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {uploads.map((u) => (
+              <Link
+                key={u.id}
+                href={`/admin/uploads/${u.id}`}
+                className="group block focus:outline-none"
+              >
+                <Card className="h-full transition-all hover:shadow-md hover:-translate-y-[1px] focus-visible:ring-2 focus-visible:ring-ring">
+                  <CardHeader className="pb-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <CardTitle className="text-base leading-5 line-clamp-2">
+                        {u.campaign_name}
+                      </CardTitle>
+
+                      {/* Status pill */}
+                      <StatusBadge status={u.status} kind="campaign" />
+                    </div>
+                  </CardHeader>
+
+                  <CardContent className="pt-0">
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div className="space-y-1">
+                        <div className="text-xs opacity-60">Rows</div>
+                        <div className="font-medium tabular-nums">{u.total_rows}</div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="text-xs opacity-60">Created</div>
+                        <div className="font-medium">
+                          {new Date(u.created_at).toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 flex items-center justify-end text-xs opacity-70">
+                      <span className="transition-transform group-hover:translate-x-0.5">
+                        View →
+                      </span>
+                    </div>
+                  </CardContent>
+                </Card>
+              </Link>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
