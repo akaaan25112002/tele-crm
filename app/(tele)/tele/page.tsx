@@ -132,7 +132,7 @@ export default function TeleHome() {
                     </div>
                   </div>
                 ) : (
-                  <div className="text-xs opacity-60">(Optional) Enable rpc_my_campaigns for faster stats.</div>
+                  <div className="text-xs opacity-60"></div>
                 )}
               </CardContent>
             </Card>
