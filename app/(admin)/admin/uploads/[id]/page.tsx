@@ -886,8 +886,8 @@ export default function UploadDetailPage() {
                       <TableCell>{fmtDT(c.last_called_at)}</TableCell>
 
                       <TableCell>
-                        <div className="text-sm font-medium truncate">{c.last_result_detail ?? "—"}</div>
-                        <div className="text-xs opacity-60 truncate">{c.last_result_group ?? "—"}</div>
+                        <div className="text-sm font-medium truncate">{c.last_result_group ?? "—"}</div>
+                        <div className="text-xs opacity-60 truncate">{c.last_result_detail ?? "—"}</div>
                       </TableCell>
 
                       <TableCell className="max-w-[280px]">
