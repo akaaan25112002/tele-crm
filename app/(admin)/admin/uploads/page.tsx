@@ -137,11 +137,39 @@ async function sha256Hex(input: string) {
 }
 
 /**
+ * ✅ Template columns (case-insensitive)
+ * Person ID, Company Info, Company Name, Given Name, Family Name,
+ * Job Title, Department, Country, Email, Email (Second),
+ * Telephone Number, Mobile Number, Address-Line1, City, State,
+ * Registered Event, Visited Event
+ */
+const TEMPLATE_REQUIRED_HEADERS = [
+  "person id",
+  "company name",
+  "email",
+  "telephone number",
+];
+
+/** Validate header existence to catch wrong template / broken CSV parsing early */
+function validateTemplateHeaders(firstRowRaw: Row) {
+  const rr = normalizeRow(firstRowRaw);
+  const missing: string[] = [];
+  for (const h of TEMPLATE_REQUIRED_HEADERS) {
+    if (rr[h] === undefined) missing.push(h);
+  }
+  return missing;
+}
+
+/**
  * source_row_key: stable-ish fallback for tracing rows (not used for dedupe policy now)
  */
 async function buildSourceRowKey(rr: Row) {
   const external_person_id = safeRaw(pick(rr, ["person id", "personid", "external_person_id"]));
   const email = safeLower(pick(rr, ["email"]));
+  const email2 = safeLower(
+    pick(rr, ["email (second)", "email second", "email_2", "email2", "email_second"])
+  );
+
   const company = safeLower(pick(rr, ["company name", "company_name"]));
   const given = safeLower(pick(rr, ["given name", "given_name"]));
   const family = safeLower(pick(rr, ["family name", "family_name"]));
@@ -154,13 +182,17 @@ async function buildSourceRowKey(rr: Row) {
 
   const job = safeLower(pick(rr, ["job title", "job_title"]));
   const dept = safeLower(pick(rr, ["department"]));
-  const city = safeLower(pick(rr, ["city/ward", "city", "ward", "city_ward"]));
+  const city = safeLower(pick(rr, ["city", "city/ward", "ward", "city_ward"]));
   const state = safeLower(pick(rr, ["state"]));
   const country = safeLower(pick(rr, ["country"]));
+
+  const regEvt = safeLower(pick(rr, ["registered event", "registered_event"]));
+  const visEvt = safeLower(pick(rr, ["visited event", "visited_event"]));
 
   const parts = [
     external_person_id || "",
     email || "",
+    email2 || "",
     company || "",
     given || "",
     family || "",
@@ -172,6 +204,8 @@ async function buildSourceRowKey(rr: Row) {
     city || "",
     state || "",
     country || "",
+    regEvt || "",
+    visEvt || "",
   ];
 
   return sha256Hex(parts.join("|"));
@@ -191,12 +225,17 @@ type ContactInsert = {
   mobile_number: string | null;
   normalized_phone: string | null;
 
+  company_info: string | null;
   company_name: string | null;
+
   given_name: string | null;
   family_name: string | null;
+
   job_title: string | null;
   department: string | null;
+
   email: string | null;
+  email_second: string | null;
 
   address_line1: string | null;
   address_line2: string | null;
@@ -205,7 +244,12 @@ type ContactInsert = {
   state: string | null;
   country: string | null;
 
+  registered_event: string | null;
+  visited_event: string | null;
+
   normalized_email: string | null;
+  normalized_email_second: string | null;
+
   source_row_key: string | null;
 };
 
@@ -231,7 +275,9 @@ function summarizeRow(x: ContactInsert) {
     row_no: x.row_no,
     external_person_id: x.external_person_id,
     normalized_email: x.normalized_email,
+    normalized_email_second: x.normalized_email_second,
     email: x.email,
+    email_second: x.email_second,
     normalized_phone: x.normalized_phone,
     telephone_number: x.telephone_number,
     company_name: x.company_name,
@@ -242,6 +288,8 @@ function summarizeRow(x: ContactInsert) {
     city_ward: x.city_ward,
     state: x.state,
     country: x.country,
+    registered_event: x.registered_event,
+    visited_event: x.visited_event,
     source_row_key: x.source_row_key,
   };
 }
@@ -312,6 +360,22 @@ async function persistIssues(uploadId: string, issues: ImportIssueRow[]) {
   }
 }
 
+/** Heuristic guard: prevent saving company_name into given_name when person name is missing */
+function fixNameAnomaly(company: string | null, given: string | null, family: string | null) {
+  const c = (company ?? "").trim().toLowerCase();
+  const g = (given ?? "").trim().toLowerCase();
+  const f = (family ?? "").trim();
+
+  if (!c) return { given, family };
+  if (!g) return { given, family };
+
+  // If given == company and family empty -> very likely shifted CSV / wrong mapping -> null it
+  if (g === c && !f) {
+    return { given: null, family: family ?? null };
+  }
+  return { given, family };
+}
+
 export default function AdminUploadsPage() {
   const router = useRouter();
 
@@ -360,6 +424,16 @@ export default function AdminUploadsPage() {
       const rows = await parseFile(file);
       if (!rows.length) throw new Error("File has no data rows.");
 
+      // ✅ Validate template headers early (catch wrong delimiter / broken CSV)
+      const missing = validateTemplateHeaders(rows[0]);
+      if (missing.length) {
+        throw new Error(
+          `Template headers missing: ${missing.join(", ")}.\n` +
+            `Please upload đúng template.\n` +
+            `Nếu CSV có dấu phẩy trong Company Info/Company Name, hãy đảm bảo các ô được quote (\"...\") hoặc dùng XLSX.`
+        );
+      }
+
       setLog(`Creating upload record... (${rows.length} rows)`);
 
       const { data: sess } = await supabase.auth.getSession();
@@ -381,11 +455,36 @@ export default function AdminUploadsPage() {
       if (upErr) throw upErr;
       uploadId = String(upload.id);
 
-      setLog("Mapping rows (normalize phone/email + build source_row_key)...");
+      setLog("Mapping rows (template map + normalize phone/email + build source_row_key)...");
       const mapped: ContactInsert[] = [];
 
       for (let idx = 0; idx < rows.length; idx++) {
         const rr = normalizeRow(rows[idx]);
+
+        // Template keys (+ safe aliases)
+        const external_person_id_raw = asStringOrNull(pick(rr, ["person id", "personid", "external_person_id"]));
+        const external_person_id = external_person_id_raw ? external_person_id_raw.trim() : null;
+
+        const company_info = asStringOrNull(pick(rr, ["company info", "company_info"]));
+        const company_name = asStringOrNull(pick(rr, ["company name", "company_name"]));
+
+        let given_name = asStringOrNull(pick(rr, ["given name", "given_name"]));
+        let family_name = asStringOrNull(pick(rr, ["family name", "family_name"]));
+
+        // ✅ Fix anomaly: company duplicated into given name when person name missing
+        ({ given: given_name, family: family_name } = fixNameAnomaly(company_name, given_name, family_name));
+
+        const job_title = asStringOrNull(pick(rr, ["job title", "job_title"]));
+        const department = asStringOrNull(pick(rr, ["department"]));
+        const country = asStringOrNull(pick(rr, ["country"]));
+
+        const email = asStringOrNull(pick(rr, ["email"]));
+        const normalized_email = normEmail(email);
+
+        const email_second = asStringOrNull(
+          pick(rr, ["email (second)", "email second", "email_2", "email2", "email_second"])
+        );
+        const normalized_email_second = normEmail(email_second);
 
         const tel = pick(rr, [
           "telephone number",
@@ -401,14 +500,18 @@ export default function AdminUploadsPage() {
         const normalized = buildNormalizedPhone(tel ? String(tel) : "", cc ? String(cc) : "", mn ? String(mn) : "");
         const normalized_phone = normalized && String(normalized).trim() ? String(normalized).trim() : null;
 
-        const email = asStringOrNull(pick(rr, ["email"]));
-        const normalized_email = normEmail(email);
-
         const rawDate = pick(rr, ["date", "import date", "import_date"]);
         const import_date = parseImportDate(rawDate);
 
-        const external_person_id_raw = asStringOrNull(pick(rr, ["person id", "personid", "external_person_id"]));
-        const external_person_id = external_person_id_raw ? external_person_id_raw.trim() : null;
+        const address_line1 = asStringOrNull(pick(rr, ["address-line1", "address line1", "address_line1", "address 1"]));
+        const address_line2 = asStringOrNull(pick(rr, ["address-line2", "address line2", "address_line2", "address 2"]));
+        const address_line3 = asStringOrNull(pick(rr, ["address-line3", "address line3", "address_line3", "address 3"]));
+
+        const city_ward = asStringOrNull(pick(rr, ["city", "city/ward", "ward", "city_ward"]));
+        const state = asStringOrNull(pick(rr, ["state"]));
+
+        const registered_event = asStringOrNull(pick(rr, ["registered event", "registered_event"]));
+        const visited_event = asStringOrNull(pick(rr, ["visited event", "visited_event"]));
 
         const source_row_key = await buildSourceRowKey(rr);
 
@@ -426,21 +529,31 @@ export default function AdminUploadsPage() {
           mobile_number: asStringOrNull(mn),
           normalized_phone,
 
-          company_name: asStringOrNull(pick(rr, ["company name", "company_name"])),
-          given_name: asStringOrNull(pick(rr, ["given name", "given_name"])),
-          family_name: asStringOrNull(pick(rr, ["family name", "family_name"])),
-          job_title: asStringOrNull(pick(rr, ["job title", "job_title"])),
-          department: asStringOrNull(pick(rr, ["department"])),
-          email,
+          company_info,
+          company_name,
 
-          address_line1: asStringOrNull(pick(rr, ["address-line1", "address line1", "address_line1", "address 1"])),
-          address_line2: asStringOrNull(pick(rr, ["address-line2", "address line2", "address_line2", "address 2"])),
-          address_line3: asStringOrNull(pick(rr, ["address-line3", "address line3", "address_line3", "address 3"])),
-          city_ward: asStringOrNull(pick(rr, ["city/ward", "city", "ward", "city_ward"])),
-          state: asStringOrNull(pick(rr, ["state"])),
-          country: asStringOrNull(pick(rr, ["country"])),
+          given_name,
+          family_name,
+
+          job_title,
+          department,
+
+          email,
+          email_second,
+
+          address_line1,
+          address_line2,
+          address_line3,
+          city_ward,
+          state,
+          country,
+
+          registered_event,
+          visited_event,
 
           normalized_email,
+          normalized_email_second,
+
           source_row_key,
         });
       }
@@ -458,9 +571,6 @@ export default function AdminUploadsPage() {
         setLog((prev) => prev + `\n⚠ Audit save failed: ${e?.message ?? String(e)}`);
       }
 
-      // payload stripping (keep your style; does not change policy now)
-      // NOTE: We no longer use A/B/C splitting by identity. We only keep these types to avoid accidental unique collisions
-      // if you still have legacy indexes in DB. However, the recommended DB index is only triple-unique, so this is optional.
       type Payload = ContactInsert;
       const payload: Payload[] = kept;
 
@@ -485,8 +595,7 @@ export default function AdminUploadsPage() {
 
       setLog((prev) => prev + `\nUpserting contacts...`);
 
-      // ✅ This must match the DB unique index: uq_contacts_upload_pid_email_phone
-      // Will only conflict when ALL 3 exist and match.
+      // ✅ Must match DB unique index
       const ON_CONFLICT = "upload_id,external_person_id,normalized_email,normalized_phone";
 
       await upsertChunked("ALL) Insert rows (triple-dedupe only)", payload, ON_CONFLICT, true);

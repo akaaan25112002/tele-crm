@@ -10,6 +10,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { StatusBadge } from "@/components/status-badge";
+import { buildNormalizedPhone } from "@/lib/crm/phone";
+
+// ✅ Use the new dialog component
+import { AddContactDialog } from "@/components/AddContactDialog";
 
 function nowIso() {
   return new Date().toISOString();
@@ -31,6 +35,10 @@ type Contact = {
   id: string;
   external_person_id: string | null;
 
+  company_info?: string | null;
+  registered_event?: string | null;
+  visited_event?: string | null;
+
   company_name: string | null;
   given_name: string | null;
   family_name: string | null;
@@ -43,6 +51,7 @@ type Contact = {
   job_title: string | null;
   department: string | null;
   email: string | null;
+  email_second?: string | null;
 
   address_line1: string | null;
   address_line2: string | null;
@@ -66,9 +75,12 @@ type Contact = {
   family_name_effective?: string | null;
   company_name_effective?: string | null;
   email_effective?: string | null;
+  email_second_effective?: string | null;
+
   telephone_number_effective?: string | null;
   mobile_country_code_effective?: string | null;
   mobile_number_effective?: string | null;
+
   address_line1_effective?: string | null;
   address_line2_effective?: string | null;
   address_line3_effective?: string | null;
@@ -95,6 +107,7 @@ type EditFieldKey =
   | "family_name"
   | "company_name"
   | "email"
+  | "email_second"
   | "telephone_number"
   | "mobile_country_code"
   | "mobile_number"
@@ -114,6 +127,7 @@ const EDIT_FIELDS: EditField[] = [
   { key: "family_name", label: "Family name" },
   { key: "company_name", label: "Company name" },
   { key: "email", label: "Email" },
+  { key: "email_second", label: "Email (Second)" },
   { key: "telephone_number", label: "Telephone number" },
   { key: "mobile_country_code", label: "Mobile CC" },
   { key: "mobile_number", label: "Mobile number" },
@@ -170,6 +184,71 @@ function finalStatusBadge(fs?: FinalStatus | null) {
   return <Badge>{text}</Badge>;
 }
 
+/*
+==========================
+Add Contact model (match AddContactDialog props shape)
+==========================
+*/
+type CampaignOptionRow = { id: string; campaign_name: string };
+
+type AddFormState = {
+  upload_id: string;
+
+  external_person_id: string;
+  company_name: string;
+  given_name: string;
+  family_name: string;
+
+  email: string;
+  email_second: string;
+
+  telephone_number: string;
+  mobile_country_code: string;
+  mobile_number: string;
+
+  job_title: string;
+  department: string;
+  country: string;
+
+  address_line1: string;
+  city_ward: string;
+  state: string;
+
+  company_info: string;
+  registered_event: string;
+  visited_event: string;
+};
+
+function emptyAddForm(): AddFormState {
+  return {
+    upload_id: "",
+
+    external_person_id: "",
+    company_name: "",
+    given_name: "",
+    family_name: "",
+
+    email: "",
+    email_second: "",
+
+    telephone_number: "",
+    mobile_country_code: "",
+    mobile_number: "",
+
+    job_title: "",
+    department: "",
+    country: "",
+
+    address_line1: "",
+    city_ward: "",
+    state: "",
+
+    company_info: "",
+    registered_event: "",
+    visited_event: "",
+  };
+}
+
 export default function TeleWorkspacePage() {
   const router = useRouter();
 
@@ -202,7 +281,6 @@ export default function TeleWorkspacePage() {
 
   // Search
   const [q, setQ] = useState("");
-
   const debounceTimer = useRef<any>(null);
 
   const active = useMemo(() => contacts.find((c) => c.id === activeId) ?? null, [contacts, activeId]);
@@ -229,6 +307,7 @@ export default function TeleWorkspacePage() {
       const tel = (c.telephone_number_effective ?? c.telephone_number ?? "").toLowerCase();
       const mob = (c.normalized_phone ?? "").toLowerCase();
       const em = (c.email_effective ?? c.email ?? "").toLowerCase();
+      const em2 = (c.email_second_effective ?? c.email_second ?? "").toLowerCase();
       const pid = (c.external_person_id ?? "").toLowerCase();
       return (
         gn.includes(s) ||
@@ -237,6 +316,7 @@ export default function TeleWorkspacePage() {
         tel.includes(s) ||
         mob.includes(s) ||
         em.includes(s) ||
+        em2.includes(s) ||
         pid.includes(s)
       );
     });
@@ -258,7 +338,58 @@ export default function TeleWorkspacePage() {
     }, 300);
   };
 
-  // ===== Auth + role guard (match backend policy)
+  // ===== Add Contact state =====
+  const [showAdd, setShowAdd] = useState(false);
+  const [campaignOptions, setCampaignOptions] = useState<CampaignOptionRow[]>([]);
+  const [addForm, setAddForm] = useState<AddFormState>(emptyAddForm());
+  const [adding, setAdding] = useState(false);
+
+  // ✅ return opts so openAdd can default immediately (no stale state)
+  const loadCampaignOptions = async (): Promise<CampaignOptionRow[]> => {
+    const { data: uData } = await supabase.auth.getUser();
+    const uid = uData.user?.id ?? null;
+    if (!uid) {
+      setCampaignOptions([]);
+      return [];
+    }
+
+    const { data, error } = await supabase
+      .from("upload_members")
+      .select("upload_id, uploads!inner(id,campaign_name,status)")
+      .eq("tele_id", uid);
+
+    if (error) {
+      console.error(error);
+      setCampaignOptions([]);
+      return [];
+    }
+
+    const rows = (data as any[]) ?? [];
+    const opts: CampaignOptionRow[] = rows
+      .map((r) => ({
+        id: String(r.uploads.id),
+        campaign_name: String(r.uploads.campaign_name ?? ""),
+        status: String(r.uploads.status ?? ""),
+      }))
+      .filter((x) => x.status !== "PAUSE" && x.status !== "DONE")
+      .map((x) => ({ id: x.id, campaign_name: x.campaign_name }));
+
+    setCampaignOptions(opts);
+    return opts;
+  };
+
+  const openAdd = async () => {
+    setTopMsg(null);
+
+    const opts = await loadCampaignOptions();
+    const fresh = emptyAddForm();
+    if (opts.length) fresh.upload_id = opts[0].id; // ✅ default first campaign immediately
+
+    setAddForm(fresh);
+    setShowAdd(true);
+  };
+
+  // ===== Auth + role guard
   const loadMe = async () => {
     const { data: uData, error: uErr } = await supabase.auth.getUser();
     if (uErr) throw uErr;
@@ -310,7 +441,7 @@ export default function TeleWorkspacePage() {
   const loadQueue = async (uid?: string | null) => {
     setTopMsg(null);
 
-    const effectiveUid = uid ?? meId; // fallback
+    const effectiveUid = uid ?? meId;
     if (!effectiveUid) {
       setContacts([]);
       setActiveId(null);
@@ -320,7 +451,50 @@ export default function TeleWorkspacePage() {
 
     const { data, error } = await supabase
       .from("v_contacts_effective")
-      .select("id,external_person_id,company_name,given_name,family_name,telephone_number,mobile_country_code,mobile_number,normalized_phone,email,job_title,department,address_line1,address_line2,address_line3,city_ward,state,country,current_status,call_attempts,last_called_at,last_result_id,last_note_text,assigned_at,lease_expires_at,given_name_effective,family_name_effective,company_name_effective,email_effective,telephone_number_effective,mobile_country_code_effective,mobile_number_effective,address_line1_effective,address_line2_effective,address_line3_effective,city_ward_effective,state_effective,country_effective")
+      .select(
+        [
+          "id",
+          "external_person_id",
+          "company_name",
+          "given_name",
+          "family_name",
+          "telephone_number",
+          "mobile_country_code",
+          "mobile_number",
+          "normalized_phone",
+          "email",
+          "email_second",
+          "job_title",
+          "department",
+          "address_line1",
+          "address_line2",
+          "address_line3",
+          "city_ward",
+          "state",
+          "country",
+          "current_status",
+          "call_attempts",
+          "last_called_at",
+          "last_result_id",
+          "last_note_text",
+          "assigned_at",
+          "lease_expires_at",
+          "given_name_effective",
+          "family_name_effective",
+          "company_name_effective",
+          "email_effective",
+          "email_second_effective",
+          "telephone_number_effective",
+          "mobile_country_code_effective",
+          "mobile_number_effective",
+          "address_line1_effective",
+          "address_line2_effective",
+          "address_line3_effective",
+          "city_ward_effective",
+          "state_effective",
+          "country_effective",
+        ].join(",")
+      )
       .eq("assigned_to", effectiveUid)
       .gt("lease_expires_at", nowIso())
       .order("assigned_at", { ascending: true })
@@ -334,13 +508,13 @@ export default function TeleWorkspacePage() {
       return;
     }
 
-    const rows = ((data as any[]) ?? []) as Contact[];
+    const rows = (((data as any[]) ?? []) as any[]).map((x) => x as Contact);
     setContacts(rows);
 
     setActiveId((prev) => {
       if (!rows.length) return null;
       if (!prev) return rows[0].id;
-      if (!rows.find((x) => x.id === prev)) return rows[0].id;
+      if (!rows.find((z) => z.id === prev)) return rows[0].id;
       return prev;
     });
   };
@@ -370,7 +544,6 @@ export default function TeleWorkspacePage() {
   };
 
   const refreshQueue = async () => {
-    // dùng meId hiện tại
     await loadQueue();
   };
 
@@ -381,9 +554,10 @@ export default function TeleWorkspacePage() {
 
     (async () => {
       try {
-        const uid = await loadMe();   // ✅ lấy uid thật
+        const uid = await loadMe();
         await loadMeta();
-        await loadQueue(uid);         // ✅ dùng uid, không phụ thuộc setState
+        await loadQueue(uid);
+        await loadCampaignOptions();
       } catch (e: any) {
         console.error(e);
         setTopMsg(e?.message ?? "Init failed");
@@ -427,7 +601,7 @@ export default function TeleWorkspacePage() {
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true } as any);
   }, [activeId, filteredContacts]);
 
-  // ===== when note1 changes -> load note2 list + auto pick
+  // when note1 changes -> load note2 list + auto pick
   useEffect(() => {
     if (!activeId) return;
 
@@ -457,13 +631,11 @@ export default function TeleWorkspacePage() {
       const rows = ((data as any[]) ?? []) as CallResult[];
       setNote2Options(rows);
 
-      // auto-pick (general) else first
       const general = rows.find((x) => x.detail_name?.trim().toLowerCase() === "(general)");
       const chosen = general?.id ?? rows[0]?.id ?? "";
       setNote2(chosen);
       updateDraftState(activeId, { note2Id: chosen });
 
-      // IMPORTANT: save draft using LATEST state (avoid stale closure)
       setDraftById((prev) => {
         const next = {
           ...prev,
@@ -480,18 +652,16 @@ export default function TeleWorkspacePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [note1]);
 
-  // ===== when active changes -> restore draft + prefill note1/note2 from last_result_id if no draft
+  // when active changes -> restore draft + prefill note1/note2
   useEffect(() => {
     if (!active) return;
 
-    // 1) restore draft if exists
     const d = draftById[active.id];
     if (d) {
       setNote1(d.note1);
       setNote2(d.note2Id);
       setNoteText(d.noteText);
     } else {
-      // 2) if no draft, prefill from last_result_id (backend truth)
       const lr = active.last_result_id;
       if (lr && resultMap[lr]) {
         const grp = resultMap[lr].group;
@@ -515,7 +685,6 @@ export default function TeleWorkspacePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editField]);
 
-  // autosave draft store
   useEffect(() => {
     scheduleDraftSave(draftById);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -540,7 +709,6 @@ export default function TeleWorkspacePage() {
       });
       if (error) throw error;
 
-      // clear draft for this contact (server already stored last_note_text)
       setDraftById((prev) => {
         const next = { ...prev };
         delete next[active.id];
@@ -555,7 +723,6 @@ export default function TeleWorkspacePage() {
       setTopMsg(m);
       alert(m);
 
-      // if lease/owner issues => refresh queue
       const low = String(m).toLowerCase();
       if (low.includes("lease") || low.includes("owner") || low.includes("not owner")) {
         await loadQueue();
@@ -592,6 +759,64 @@ export default function TeleWorkspacePage() {
     }
   };
 
+  const createContact = async () => {
+    if (!addForm.upload_id) return alert("Please choose campaign");
+    setAdding(true);
+    setTopMsg(null);
+
+    try {
+      const normalized_phone =
+        buildNormalizedPhone(addForm.telephone_number, addForm.mobile_country_code, addForm.mobile_number) || null;
+      const normalized_email = (addForm.email || "").trim().toLowerCase() || null;
+
+      const { data, error } = await supabase.rpc("rpc_create_contact_tele", {
+        p_upload_id: addForm.upload_id,
+
+        p_external_person_id: addForm.external_person_id || null,
+        p_company_info: addForm.company_info || null,
+        p_company_name: addForm.company_name || null,
+        p_given_name: addForm.given_name || null,
+        p_family_name: addForm.family_name || null,
+        p_job_title: addForm.job_title || null,
+        p_department: addForm.department || null,
+        p_country: addForm.country || null,
+
+        p_email: addForm.email || null,
+        p_email_second: addForm.email_second || null,
+
+        p_telephone_number: addForm.telephone_number || null,
+        p_mobile_country_code: addForm.mobile_country_code || null,
+        p_mobile_number: addForm.mobile_number || null,
+        p_normalized_phone: normalized_phone,
+        p_normalized_email: normalized_email,
+
+        p_address_line1: addForm.address_line1 || null,
+        p_city_ward: addForm.city_ward || null,
+        p_state: addForm.state || null,
+
+        p_registered_event: addForm.registered_event || null,
+        p_visited_event: addForm.visited_event || null,
+
+        p_lease_minutes: 270,
+      });
+
+      if (error) throw error;
+
+      const newId = String(data);
+      setShowAdd(false);
+      setAddForm(emptyAddForm());
+
+      await loadQueue();
+      setActiveId(newId);
+    } catch (e: any) {
+      const m = e?.message ?? "Add contact failed";
+      setTopMsg(m);
+      alert(m);
+    } finally {
+      setAdding(false);
+    }
+  };
+
   const displayName = useMemo(() => {
     if (!active) return "—";
     const gn = active.given_name_effective ?? active.given_name;
@@ -603,9 +828,7 @@ export default function TeleWorkspacePage() {
   const selectedNote2 = useMemo(() => note2Options.find((x) => x.id === note2) ?? null, [note2Options, note2]);
   const selectedFinalStatus = (selectedNote2?.final_status ?? null) as FinalStatus | null;
 
-  // role guard message
-  const roleWarn =
-    meId && meRole && meRole !== "TELE" ? `This page is TELE-only. Your role is ${meRole}.` : null;
+  const roleWarn = meId && meRole && meRole !== "TELE" ? `This page is TELE-only. Your role is ${meRole}.` : null;
 
   return (
     <div className="min-h-full">
@@ -621,9 +844,14 @@ export default function TeleWorkspacePage() {
                 <CardTitle className="text-lg">
                   My Queue <span className="text-xs opacity-60">({contacts.length}/100)</span>
                 </CardTitle>
-                <Button variant="outline" size="sm" onClick={() => void refreshQueue()} disabled={busy}>
-                  Refresh
-                </Button>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => void refreshQueue()} disabled={busy}>
+                    Refresh
+                  </Button>
+                  <Button size="sm" onClick={() => void openAdd()} disabled={busy}>
+                    Add Contact
+                  </Button>
+                </div>
               </div>
 
               <Input
@@ -643,9 +871,7 @@ export default function TeleWorkspacePage() {
                 const gn = c.given_name_effective ?? c.given_name;
                 const fn = c.family_name_effective ?? c.family_name;
                 const name =
-                  [gn, fn].filter(Boolean).join(" ").trim() ||
-                  (c.company_name_effective ?? c.company_name) ||
-                  "(No name)";
+                  [gn, fn].filter(Boolean).join(" ").trim() || (c.company_name_effective ?? c.company_name) || "(No name)";
 
                 const isActive = c.id === activeId;
 
@@ -665,10 +891,11 @@ export default function TeleWorkspacePage() {
                       <StatusBadge status={c.current_status} kind="contact" />
                     </div>
 
-                    <div className="text-xs opacity-70 mt-1">
-                      Tel: {c.telephone_number_effective ?? c.telephone_number ?? "—"}
-                    </div>
+                    <div className="text-xs opacity-70 mt-1">Tel: {c.telephone_number_effective ?? c.telephone_number ?? "—"}</div>
                     <div className="text-xs opacity-70 mt-1">• Mobile: {c.normalized_phone ?? "—"}</div>
+                    <div className="text-xs opacity-70 mt-1">
+                      • Email2: {c.email_second_effective ?? c.email_second ?? "—"}
+                    </div>
                     <div className="text-xs opacity-70 mt-1">• attempts: {c.call_attempts ?? 0}</div>
                     <div className="text-xs opacity-70 mt-1">Lease: {leaseText}</div>
                   </button>
@@ -713,9 +940,7 @@ export default function TeleWorkspacePage() {
                       <div className="font-semibold">{displayName}</div>
 
                       <div className="text-xs opacity-70 mt-2">Telephone number</div>
-                      <div className="font-semibold">
-                        {active.telephone_number_effective ?? active.telephone_number ?? "—"}
-                      </div>
+                      <div className="font-semibold">{active.telephone_number_effective ?? active.telephone_number ?? "—"}</div>
 
                       <div className="text-xs opacity-70 mt-2">Mobile number</div>
                       <div className="font-semibold">
@@ -726,10 +951,13 @@ export default function TeleWorkspacePage() {
                       <div className="text-xs opacity-70 mt-2">Email</div>
                       <div className="font-semibold text-sm">{active.email_effective ?? active.email ?? "—"}</div>
 
-                      <div className="text-xs opacity-70 mt-2">Address</div>
+                      <div className="text-xs opacity-70 mt-2">Email (Second)</div>
                       <div className="font-semibold text-sm">
-                        {active.address_line1_effective ?? active.address_line1 ?? "—"}
+                        {active.email_second_effective ?? active.email_second ?? "—"}
                       </div>
+
+                      <div className="text-xs opacity-70 mt-2">Address</div>
+                      <div className="font-semibold text-sm">{active.address_line1_effective ?? active.address_line1 ?? "—"}</div>
                     </div>
 
                     <div className="p-3 rounded-lg border space-y-2">
@@ -768,7 +996,7 @@ export default function TeleWorkspacePage() {
                   <div className="rounded-lg border p-3 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="font-medium">Agent Edit (log-only)</div>
-                      <div className="text-xs opacity-60">Export will show edited_* columns</div>
+                      <div className="text-xs opacity-60">Edits are tracked in contact_edits</div>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
@@ -802,8 +1030,7 @@ export default function TeleWorkspacePage() {
                           </Button>
                         </div>
                         <div className="text-xs opacity-60">
-                          Current (effective):{" "}
-                          <span className="font-medium">{getEffective(active, editField) || "—"}</span>
+                          Current (effective): <span className="font-medium">{getEffective(active, editField) || "—"}</span>
                         </div>
                       </div>
                     </div>
@@ -931,6 +1158,17 @@ export default function TeleWorkspacePage() {
           </Card>
         </div>
       </div>
+
+      {/* ✅ Use AddContactDialog instead of duplicated modal */}
+      <AddContactDialog
+        open={showAdd}
+        onOpenChange={setShowAdd}
+        adding={adding}
+        addForm={addForm as any} // structural match; keep if TS complains due to private types
+        setAddForm={setAddForm as any}
+        campaignOptions={campaignOptions as any}
+        onCreate={createContact}
+      />
     </div>
   );
 }

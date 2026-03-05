@@ -95,11 +95,14 @@ export default function CampaignPullPage() {
     if (!id) return;
     setPLoading(true);
     try {
-      // ✅ RPC usually returns an object (not array) from Supabase
-      const { data, error } = await supabase.rpc("rpc_campaign_progress_tele", { p_upload_id: id });
+      const { data, error } = await supabase.rpc("rpc_campaign_progress_tele", {
+        p_upload_id: id,
+      });
       if (error) throw error;
 
-      const row = data as any;
+      // Supabase RPC can return array (setof) or object; normalize to 1 row
+      const row = Array.isArray(data) ? data[0] : data;
+
       if (!row || typeof row !== "object") {
         setP(null);
         return;
@@ -124,7 +127,6 @@ export default function CampaignPullPage() {
       });
     } catch (e: any) {
       console.error(e);
-      // progress fail should not block pulling
       setMsg(e?.message ?? "Load progress failed");
       setP(null);
     } finally {
