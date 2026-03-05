@@ -19,8 +19,8 @@ export function AppShell({
   };
 
   return (
-    <div className="min-h-screen">
-      <header className="sticky top-0 z-10 border-b bg-background/80 backdrop-blur">
+    <div className="h-screen flex flex-col">
+      <header className="shrink-0 border-b bg-background/80 backdrop-blur">
         <div className="mx-auto max-w-7xl px-4 py-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-4">
             <div className="font-semibold">{title}</div>
@@ -32,13 +32,17 @@ export function AppShell({
               ))}
             </nav>
           </div>
+
           <Button variant="outline" size="sm" onClick={logout}>
             Logout
           </Button>
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl px-4 py-6">{children}</main>
+      {/* Single scroll container for ALL pages */}
+      <div className="flex-1 overflow-y-auto">
+        <main className="mx-auto max-w-7xl px-4 py-6">{children}</main>
+      </div>
     </div>
   );
 }

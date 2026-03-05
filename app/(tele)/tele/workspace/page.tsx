@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -26,7 +27,6 @@ function msRemainingToText(ms: number) {
   return `${h}h ${m}m remaining`;
 }
 
-// ===== Types =====
 type Contact = {
   id: string;
   external_person_id: string | null;
@@ -138,7 +138,6 @@ function isTypingTarget(el: EventTarget | null) {
   const t = el as HTMLElement | null;
   if (!t) return false;
   const tag = (t.tagName || "").toLowerCase();
-  // shadcn Select uses button; we consider input/textarea/contenteditable as typing.
   if (tag === "input" || tag === "textarea") return true;
   if (t.isContentEditable) return true;
   return false;
@@ -165,7 +164,6 @@ function saveDraftStore(store: Record<string, Draft>) {
 function finalStatusBadge(fs?: FinalStatus | null) {
   if (!fs) return null;
   const text = String(fs);
-  // keep styling simple but clear
   if (text === "DONE") return <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">DONE</Badge>;
   if (text === "INVALID") return <Badge className="bg-rose-600 text-white hover:bg-rose-600">INVALID</Badge>;
   if (text === "CALLBACK") return <Badge className="bg-amber-500 text-black hover:bg-amber-500">CALLBACK</Badge>;
@@ -173,6 +171,11 @@ function finalStatusBadge(fs?: FinalStatus | null) {
 }
 
 export default function TeleWorkspacePage() {
+  const router = useRouter();
+
+  const [meId, setMeId] = useState<string | null>(null);
+  const [meRole, setMeRole] = useState<string | null>(null);
+
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
 
@@ -255,11 +258,50 @@ export default function TeleWorkspacePage() {
     }, 300);
   };
 
+  // ===== Auth + role guard (match backend policy)
+  const loadMe = async () => {
+    // getUser() ổn định hơn getSession() trong nhiều case RLS/refresh
+    const { data: uData, error: uErr } = await supabase.auth.getUser();
+    if (uErr) throw uErr;
+    const uid = uData.user?.id ?? null;
+    setMeId(uid);
+
+    if (!uid) {
+      setMeRole(null);
+      return;
+    }
+
+    const { data: p, error: pErr } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", uid)
+      .single();
+
+    if (pErr) {
+      // profile missing => sẽ gây kick permissions; show hướng xử lý
+      setMeRole(null);
+      throw new Error(
+        `Profile not found / permission denied. Ensure trigger creates profiles for new users and you inserted profiles.role. (${pErr.message})`
+      );
+    }
+
+    const role = String((p as any)?.role ?? "");
+    setMeRole(role);
+
+    // Tele page chỉ cho TELE
+    if (role !== "TELE") {
+      throw new Error(`Role mismatch: this page requires TELE but your role is "${role}".`);
+    }
+  };
+
   const loadMeta = async () => {
-    const [{ data: gData }, { data: rData }] = await Promise.all([
+    const [{ data: gData, error: gErr }, { data: rData, error: rErr }] = await Promise.all([
       supabase.from("v_call_result_groups").select("group_name"),
       supabase.from("call_results").select("id,group_name,detail_name,final_status").eq("is_active", true),
     ]);
+
+    if (gErr) throw gErr;
+    if (rErr) throw rErr;
 
     setNote1Options(((gData as any[]) ?? []).map((x) => String(x.group_name)));
 
@@ -277,16 +319,13 @@ export default function TeleWorkspacePage() {
   const loadQueue = async () => {
     setTopMsg(null);
 
-    const { data: sess } = await supabase.auth.getSession();
-    const uid = sess.session?.user.id;
-    if (!uid) {
+    if (!meId) {
       setContacts([]);
       setActiveId(null);
       setTopMsg("Not authenticated");
       return;
     }
 
-    // IMPORTANT: cap UI to 100 too (backend cap is the real protection)
     const { data, error } = await supabase
       .from("v_contacts_effective")
       .select(
@@ -332,7 +371,7 @@ export default function TeleWorkspacePage() {
           "country_effective",
         ].join(",")
       )
-      .eq("assigned_to", uid)
+      .eq("assigned_to", meId)
       .gt("lease_expires_at", nowIso())
       .order("assigned_at", { ascending: true })
       .limit(100);
@@ -384,14 +423,20 @@ export default function TeleWorkspacePage() {
     );
   };
 
-  // init: load drafts from localStorage, meta, queue
+  // init
   useEffect(() => {
     const store = loadDraftStore();
     setDraftById(store);
 
     (async () => {
-      await loadMeta();
-      await loadQueue();
+      try {
+        await loadMe();
+        await loadMeta();
+        await loadQueue();
+      } catch (e: any) {
+        console.error(e);
+        setTopMsg(e?.message ?? "Init failed");
+      }
     })();
 
     return () => {
@@ -400,19 +445,17 @@ export default function TeleWorkspacePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // hotkeys: Ctrl+Enter submit, ArrowUp/Down change contact (only if not typing)
+  // hotkeys
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const typing = isTypingTarget(e.target);
 
-      // Ctrl+Enter submit (allow even when typing in textarea)
       if (e.ctrlKey && e.key === "Enter") {
         e.preventDefault();
         void submitCall();
         return;
       }
 
-      // change contact only when NOT typing
       if (typing) return;
 
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -433,7 +476,7 @@ export default function TeleWorkspacePage() {
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true } as any);
   }, [activeId, filteredContacts]);
 
-  // when note1 changes -> load note2 options + auto pick (general)
+  // ===== when note1 changes -> load note2 list + auto pick
   useEffect(() => {
     if (!activeId) return;
 
@@ -463,30 +506,50 @@ export default function TeleWorkspacePage() {
       const rows = ((data as any[]) ?? []) as CallResult[];
       setNote2Options(rows);
 
+      // auto-pick (general) else first
       const general = rows.find((x) => x.detail_name?.trim().toLowerCase() === "(general)");
       const chosen = general?.id ?? rows[0]?.id ?? "";
       setNote2(chosen);
       updateDraftState(activeId, { note2Id: chosen });
 
-      // autosave store
-      const nextStore = { ...draftById, [activeId]: { note1, note2Id: chosen, noteText } };
-      scheduleDraftSave(nextStore);
+      // IMPORTANT: save draft using LATEST state (avoid stale closure)
+      setDraftById((prev) => {
+        const next = {
+          ...prev,
+          [activeId]: {
+            note1,
+            note2Id: chosen,
+            noteText: prev[activeId]?.noteText ?? "",
+          },
+        };
+        scheduleDraftSave(next);
+        return next;
+      });
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [note1]);
 
-  // when active changes -> restore draft + recent edits + prefill edit value
+  // ===== when active changes -> restore draft + prefill note1/note2 from last_result_id if no draft
   useEffect(() => {
     if (!active) return;
 
+    // 1) restore draft if exists
     const d = draftById[active.id];
     if (d) {
       setNote1(d.note1);
       setNote2(d.note2Id);
       setNoteText(d.noteText);
     } else {
-      setNote1("");
-      setNote2("");
+      // 2) if no draft, prefill from last_result_id (backend truth)
+      const lr = active.last_result_id;
+      if (lr && resultMap[lr]) {
+        const grp = resultMap[lr].group;
+        setNote1(grp);
+        setNote2(lr);
+      } else {
+        setNote1("");
+        setNote2("");
+      }
       setNoteText("");
     }
 
@@ -501,7 +564,7 @@ export default function TeleWorkspacePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editField]);
 
-  // keep localStorage autosave when draftById changes
+  // autosave draft store
   useEffect(() => {
     scheduleDraftSave(draftById);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -526,16 +589,24 @@ export default function TeleWorkspacePage() {
       });
       if (error) throw error;
 
-      // clear noteText only (keep note1/note2)
-      setNoteText("");
-      updateDraftState(active.id, { noteText: "" });
+      // clear draft for this contact (server already stored last_note_text)
+      setDraftById((prev) => {
+        const next = { ...prev };
+        delete next[active.id];
+        saveDraftStore(next);
+        return next;
+      });
 
+      setNoteText("");
       await loadQueue();
     } catch (e: any) {
       const m = e?.message ?? "Submit failed";
       setTopMsg(m);
       alert(m);
-      if (String(m).toLowerCase().includes("lease") || String(m).toLowerCase().includes("owner")) {
+
+      // if lease/owner issues => refresh queue
+      const low = String(m).toLowerCase();
+      if (low.includes("lease") || low.includes("owner") || low.includes("not owner")) {
         await loadQueue();
       }
     } finally {
@@ -581,19 +652,19 @@ export default function TeleWorkspacePage() {
   const selectedNote2 = useMemo(() => note2Options.find((x) => x.id === note2) ?? null, [note2Options, note2]);
   const selectedFinalStatus = (selectedNote2?.final_status ?? null) as FinalStatus | null;
 
-  // ===== FIX SCROLL / ROLLING =====
-  // Lock workspace height and let queue/panel scroll internally.
-  const shellOffset = "120px"; // adjust if your AppShell header differs
-  const rootClass = `h-[calc(100vh-${shellOffset})] overflow-hidden`;
+  // role guard message
+  const roleWarn =
+    meId && meRole && meRole !== "TELE" ? `This page is TELE-only. Your role is ${meRole}.` : null;
 
   return (
-    <div className={rootClass}>
-      <div className="h-full flex flex-col gap-3">
+    <div className="min-h-full">
+      <div className="flex flex-col gap-3">
         {topMsg && <div className="text-sm text-red-600 whitespace-pre-wrap">{topMsg}</div>}
+        {roleWarn && <div className="text-sm text-red-600 whitespace-pre-wrap">{roleWarn}</div>}
 
-        <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {/* Queue */}
-          <Card className="md:col-span-1 flex flex-col min-h-0">
+          <Card className="md:col-span-1 flex flex-col">
             <CardHeader className="flex flex-col gap-3">
               <div className="flex flex-row items-center justify-between">
                 <CardTitle className="text-lg">
@@ -616,7 +687,7 @@ export default function TeleWorkspacePage() {
               </div>
             </CardHeader>
 
-            <CardContent className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-2">
+            <CardContent className="max-h-[70vh] overflow-y-auto space-y-2 pr-2">
               {filteredContacts.map((c) => {
                 const gn = c.given_name_effective ?? c.given_name;
                 const fn = c.family_name_effective ?? c.family_name;
@@ -643,7 +714,9 @@ export default function TeleWorkspacePage() {
                       <StatusBadge status={c.current_status} kind="contact" />
                     </div>
 
-                    <div className="text-xs opacity-70 mt-1">Tel: {c.telephone_number_effective ?? c.telephone_number ?? "—"}</div>
+                    <div className="text-xs opacity-70 mt-1">
+                      Tel: {c.telephone_number_effective ?? c.telephone_number ?? "—"}
+                    </div>
                     <div className="text-xs opacity-70 mt-1">• Mobile: {c.normalized_phone ?? "—"}</div>
                     <div className="text-xs opacity-70 mt-1">• attempts: {c.call_attempts ?? 0}</div>
                     <div className="text-xs opacity-70 mt-1">Lease: {leaseText}</div>
@@ -660,15 +733,18 @@ export default function TeleWorkspacePage() {
           </Card>
 
           {/* Call panel */}
-          <Card className="md:col-span-2 flex flex-col min-h-0">
+          <Card className="md:col-span-2 flex flex-col">
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle className="text-lg">Call Panel</CardTitle>
               <div className="text-xs opacity-70">
-                Lease: <span className={!leaseValid && active ? "text-red-600 font-medium" : "font-medium"}>{leaseRemainingText}</span>
+                Lease:{" "}
+                <span className={!leaseValid && active ? "text-red-600 font-medium" : "font-medium"}>
+                  {leaseRemainingText}
+                </span>
               </div>
             </CardHeader>
 
-            <CardContent className="flex-1 min-h-0 overflow-y-auto space-y-4 pr-2">
+            <CardContent className="max-h-[70vh] overflow-y-auto space-y-4 pr-2">
               {!active ? (
                 <div className="text-sm opacity-70">Select a contact from queue.</div>
               ) : (
@@ -686,7 +762,9 @@ export default function TeleWorkspacePage() {
                       <div className="font-semibold">{displayName}</div>
 
                       <div className="text-xs opacity-70 mt-2">Telephone number</div>
-                      <div className="font-semibold">{active.telephone_number_effective ?? active.telephone_number ?? "—"}</div>
+                      <div className="font-semibold">
+                        {active.telephone_number_effective ?? active.telephone_number ?? "—"}
+                      </div>
 
                       <div className="text-xs opacity-70 mt-2">Mobile number</div>
                       <div className="font-semibold">
@@ -698,7 +776,9 @@ export default function TeleWorkspacePage() {
                       <div className="font-semibold text-sm">{active.email_effective ?? active.email ?? "—"}</div>
 
                       <div className="text-xs opacity-70 mt-2">Address</div>
-                      <div className="font-semibold text-sm">{active.address_line1_effective ?? active.address_line1 ?? "—"}</div>
+                      <div className="font-semibold text-sm">
+                        {active.address_line1_effective ?? active.address_line1 ?? "—"}
+                      </div>
                     </div>
 
                     <div className="p-3 rounded-lg border space-y-2">
@@ -878,21 +958,25 @@ export default function TeleWorkspacePage() {
                         rows={3}
                         disabled={busy || !leaseValid}
                       />
-                      <div className="text-xs opacity-60">Auto-save draft: enabled (debounce 300ms). Shortcut: Ctrl+Enter to submit.</div>
-                    </div>
-
-                    <div className="flex items-center justify-end gap-2">
-                      <Button variant="outline" onClick={loadQueue} disabled={busy}>
-                        Refresh
-                      </Button>
-                      <Button onClick={submitCall} disabled={busy || !leaseValid || !note1 || !note2}>
-                        {busy ? "Saving..." : "Submit call"}
-                      </Button>
+                      <div className="text-xs opacity-60">
+                        Auto-save draft: enabled (debounce 300ms). Shortcut: Ctrl+Enter to submit.
+                      </div>
                     </div>
                   </div>
                 </>
               )}
             </CardContent>
+
+            <div className="shrink-0 border-t bg-background/90 backdrop-blur px-6 py-3 sticky bottom-0">
+              <div className="flex items-center justify-end gap-2">
+                <Button variant="outline" onClick={loadQueue} disabled={busy}>
+                  Refresh
+                </Button>
+                <Button onClick={submitCall} disabled={busy || !leaseValid || !note1 || !note2}>
+                  {busy ? "Saving..." : "Submit call"}
+                </Button>
+              </div>
+            </div>
           </Card>
         </div>
       </div>
