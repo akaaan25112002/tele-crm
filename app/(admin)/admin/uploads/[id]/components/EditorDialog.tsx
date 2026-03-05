@@ -14,9 +14,10 @@ export default function EditorDialog(props: {
   const { vm, onSaved } = props;
 
   const renderSnapshotRow = (label: string, keyName: string) => {
-    const v = vm.snapshot ? vm.snapshot[keyName] : undefined;
+    const v = vm.snapshot ? (vm.snapshot as any)[keyName] : undefined;
     const text = v === null || v === undefined || String(v) === "" ? "—" : String(v);
     const changed = vm.editedFields.has(keyName);
+
     return (
       <div className="grid grid-cols-12 gap-2 py-1">
         <div className="col-span-4 text-xs opacity-70">{label}</div>
@@ -24,6 +25,16 @@ export default function EditorDialog(props: {
           {text}
           {changed ? <span className="ml-2 text-xs opacity-60">(edited)</span> : null}
         </div>
+      </div>
+    );
+  };
+
+  const renderValueRow = (label: string, value: any) => {
+    const text = value === null || value === undefined || String(value) === "" ? "—" : String(value);
+    return (
+      <div className="grid grid-cols-12 gap-2 py-1">
+        <div className="col-span-4 text-xs opacity-70">{label}</div>
+        <div className="col-span-8 text-sm break-words whitespace-pre-wrap">{text}</div>
       </div>
     );
   };
@@ -49,7 +60,7 @@ export default function EditorDialog(props: {
             <div className="space-y-4">
               <div className="text-xs opacity-60">
                 ContactID: <span className="font-medium">{vm.editTarget.id}</span> • Row:{" "}
-                <span className="font-medium">{vm.editTarget.row_no ?? "—"}</span>
+                <span className="font-medium">{(vm.editTarget as any).row_no ?? "—"}</span>
               </div>
 
               <div className="rounded-lg border p-3">
@@ -57,11 +68,13 @@ export default function EditorDialog(props: {
                   <div className="font-medium">Current snapshot (all fields)</div>
                   <div className="text-xs opacity-60">Fields marked (edited) have edit logs</div>
                 </div>
+
                 <div className="mt-2 border-t pt-2">
                   {renderSnapshotRow("Given name", "given_name")}
                   {renderSnapshotRow("Family name", "family_name")}
                   {renderSnapshotRow("Company name", "company_name")}
                   {renderSnapshotRow("Email", "email")}
+                  {renderSnapshotRow("Email (Second)", "email_second")}
                   {renderSnapshotRow("Telephone", "telephone_number")}
                   {renderSnapshotRow("Mobile CC", "mobile_country_code")}
                   {renderSnapshotRow("Mobile number", "mobile_number")}
@@ -74,12 +87,28 @@ export default function EditorDialog(props: {
                   {renderSnapshotRow("State", "state")}
                   {renderSnapshotRow("Country", "country")}
                   {renderSnapshotRow("Current status", "current_status")}
-                  {renderSnapshotRow("Assigned to", "assigned_to")}
+
+                  {/* show text instead of UUID */}
+                  {renderValueRow(
+                    "Assigned tele",
+                    (vm.editTarget as any)?.assigned_name ??
+                      ((vm.snapshot as any)?.assigned_to ? String((vm.snapshot as any).assigned_to).slice(0, 8) : "—")
+                  )}
                   {renderSnapshotRow("Assigned at", "assigned_at")}
                   {renderSnapshotRow("Lease expires", "lease_expires_at")}
+
                   {renderSnapshotRow("Call attempts", "call_attempts")}
                   {renderSnapshotRow("Last called at", "last_called_at")}
-                  {renderSnapshotRow("Last result id", "last_result_id")}
+
+                  {renderValueRow("Last tele", (vm.editTarget as any)?.last_action_name ?? "—")}
+
+                  {renderValueRow(
+                    "Last result",
+                    (vm.editTarget as any)?.last_result_group
+                      ? `${(vm.editTarget as any)?.last_result_group ?? "—"} / ${(vm.editTarget as any)?.last_result_detail ?? "—"}`
+                      : "—"
+                  )}
+
                   {renderSnapshotRow("Last note text", "last_note_text")}
                 </div>
               </div>
@@ -92,6 +121,7 @@ export default function EditorDialog(props: {
                     <div className="text-xs opacity-70">Given name</div>
                     <Input value={vm.f_given} onChange={(e) => vm.setF_given(e.target.value)} />
                   </div>
+
                   <div className="space-y-1">
                     <div className="text-xs opacity-70">Family name</div>
                     <Input value={vm.f_family} onChange={(e) => vm.setF_family(e.target.value)} />
@@ -107,14 +137,21 @@ export default function EditorDialog(props: {
                     <Input value={vm.f_email} onChange={(e) => vm.setF_email(e.target.value)} />
                   </div>
 
+                  <div className="space-y-1 md:col-span-2">
+                    <div className="text-xs opacity-70">Email (Second)</div>
+                    <Input value={vm.f_email_second} onChange={(e) => vm.setF_email_second(e.target.value)} />
+                  </div>
+
                   <div className="space-y-1">
                     <div className="text-xs opacity-70">Telephone number</div>
                     <Input value={vm.f_tel} onChange={(e) => vm.setF_tel(e.target.value)} />
                   </div>
+
                   <div className="space-y-1">
                     <div className="text-xs opacity-70">Mobile CC</div>
                     <Input value={vm.f_mobile_cc} onChange={(e) => vm.setF_mobile_cc(e.target.value)} />
                   </div>
+
                   <div className="space-y-1 md:col-span-2">
                     <div className="text-xs opacity-70">Mobile number</div>
                     <Input value={vm.f_mobile_no} onChange={(e) => vm.setF_mobile_no(e.target.value)} />
@@ -124,6 +161,7 @@ export default function EditorDialog(props: {
                     <div className="text-xs opacity-70">Job title</div>
                     <Input value={vm.f_job} onChange={(e) => vm.setF_job(e.target.value)} />
                   </div>
+
                   <div className="space-y-1">
                     <div className="text-xs opacity-70">Department</div>
                     <Input value={vm.f_dept} onChange={(e) => vm.setF_dept(e.target.value)} />
@@ -133,10 +171,12 @@ export default function EditorDialog(props: {
                     <div className="text-xs opacity-70">Address line 1</div>
                     <Input value={vm.f_addr1} onChange={(e) => vm.setF_addr1(e.target.value)} />
                   </div>
+
                   <div className="space-y-1 md:col-span-2">
                     <div className="text-xs opacity-70">Address line 2</div>
                     <Input value={vm.f_addr2} onChange={(e) => vm.setF_addr2(e.target.value)} />
                   </div>
+
                   <div className="space-y-1 md:col-span-2">
                     <div className="text-xs opacity-70">Address line 3</div>
                     <Input value={vm.f_addr3} onChange={(e) => vm.setF_addr3(e.target.value)} />
@@ -146,10 +186,12 @@ export default function EditorDialog(props: {
                     <div className="text-xs opacity-70">City/Ward</div>
                     <Input value={vm.f_city} onChange={(e) => vm.setF_city(e.target.value)} />
                   </div>
+
                   <div className="space-y-1">
                     <div className="text-xs opacity-70">State</div>
                     <Input value={vm.f_state} onChange={(e) => vm.setF_state(e.target.value)} />
                   </div>
+
                   <div className="space-y-1 md:col-span-2">
                     <div className="text-xs opacity-70">Country</div>
                     <Input value={vm.f_country} onChange={(e) => vm.setF_country(e.target.value)} />
@@ -206,7 +248,11 @@ export default function EditorDialog(props: {
 
                   <div className="space-y-2">
                     <div className="text-sm font-medium">Note 2</div>
-                    <Select value={vm.note2} onValueChange={vm.setNote2} disabled={!vm.note1 || vm.note2Options.length === 0}>
+                    <Select
+                      value={vm.note2}
+                      onValueChange={vm.setNote2}
+                      disabled={!vm.note1 || vm.note2Options.length === 0}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder={!vm.note1 ? "Choose Note 1 first" : "Select Note 2"} />
                       </SelectTrigger>

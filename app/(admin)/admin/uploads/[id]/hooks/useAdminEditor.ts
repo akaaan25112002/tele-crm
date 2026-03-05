@@ -15,6 +15,7 @@ export function useAdminEditor() {
   const [f_family, setF_family] = useState("");
   const [f_company, setF_company] = useState("");
   const [f_email, setF_email] = useState("");
+  const [f_email_second, setF_email_second] = useState("");
   const [f_tel, setF_tel] = useState("");
   const [f_mobile_cc, setF_mobile_cc] = useState("");
   const [f_mobile_no, setF_mobile_no] = useState("");
@@ -212,6 +213,7 @@ export function useAdminEditor() {
           "family_name",
           "company_name",
           "email",
+          "email_second",
           "telephone_number",
           "mobile_country_code",
           "mobile_number",
@@ -242,6 +244,7 @@ export function useAdminEditor() {
         setF_family(String((data as any)?.family_name ?? ""));
         setF_company(String((data as any)?.company_name ?? ""));
         setF_email(String((data as any)?.email ?? ""));
+        setF_email_second(String((data as any)?.email_second ?? ""));
         setF_tel(String((data as any)?.telephone_number ?? ""));
         setF_mobile_cc(String((data as any)?.mobile_country_code ?? ""));
         setF_mobile_no(String((data as any)?.mobile_number ?? ""));
@@ -303,6 +306,7 @@ export function useAdminEditor() {
             "family_name",
             "company_name",
             "email",
+            "email_second",
             "telephone_number",
             "mobile_country_code",
             "mobile_number",
@@ -329,6 +333,7 @@ export function useAdminEditor() {
         family_name: asStringOrNull(f_family),
         company_name: asStringOrNull(f_company),
         email: asStringOrNull(f_email),
+        email_second: asStringOrNull(f_email_second),
         telephone_number: asStringOrNull(f_tel),
         mobile_country_code: asStringOrNull(f_mobile_cc),
         mobile_number: asStringOrNull(f_mobile_no),
@@ -391,6 +396,7 @@ export function useAdminEditor() {
     f_family,
     f_company,
     f_email,
+    f_email_second,
     f_tel,
     f_mobile_cc,
     f_mobile_no,
@@ -431,6 +437,8 @@ export function useAdminEditor() {
     setF_company,
     f_email,
     setF_email,
+    f_email_second,
+    setF_email_second,
     f_tel,
     setF_tel,
     f_mobile_cc,

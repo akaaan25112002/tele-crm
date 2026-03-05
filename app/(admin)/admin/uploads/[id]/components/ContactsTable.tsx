@@ -97,6 +97,13 @@ export default function ContactsTable(props: {
                     return "EXPIRED";
                   })();
 
+                  const contactName =
+                    c.given_name || c.family_name
+                      ? `${c.given_name ?? ""} ${c.family_name ?? ""}`.trim()
+                      : c.company_name ?? "—";
+
+                  const assigneeText = c.assigned_name ?? (c.assigned_to ? c.assigned_to.slice(0, 8) : "—");
+
                   return (
                     <TableRow key={c.id}>
                       <TableCell>
@@ -114,11 +121,7 @@ export default function ContactsTable(props: {
                       </TableCell>
 
                       <TableCell>
-                        <div className="font-medium">
-                          {c.given_name || c.family_name
-                            ? `${c.given_name ?? ""} ${c.family_name ?? ""}`.trim()
-                            : c.company_name ?? "—"}
-                        </div>
+                        <div className="font-medium">{contactName}</div>
                         <div className="text-xs opacity-60 break-words whitespace-pre-wrap">
                           {c.company_name ?? "—"} • {c.email ?? "—"} • {c.normalized_phone ?? "—"}
                         </div>
@@ -137,9 +140,7 @@ export default function ContactsTable(props: {
                       </TableCell>
 
                       <TableCell>
-                        <div className="font-medium break-words">
-                          {c.assigned_name ?? (c.assigned_to ? c.assigned_to.slice(0, 8) : "—")}
-                        </div>
+                        <div className="font-medium break-words">{assigneeText}</div>
                         <div className="text-xs opacity-60">assigned: {fmtDT(c.assigned_at)}</div>
                       </TableCell>
 
@@ -149,13 +150,9 @@ export default function ContactsTable(props: {
                       </TableCell>
 
                       <TableCell>
-                        <div className="font-medium">
-                            {c.last_action_name ?? "—"}
-                        </div>
-                        <div className="text-xs opacity-60">
-                            {fmtDT(c.last_action_at)}
-                        </div>
-                        </TableCell>
+                        <div className="font-medium">{c.last_action_name ?? "—"}</div>
+                        <div className="text-xs opacity-60">{fmtDT(c.last_action_at)}</div>
+                      </TableCell>
 
                       <TableCell>
                         <div className="text-sm font-medium break-words">{c.last_result_group ?? "—"}</div>
