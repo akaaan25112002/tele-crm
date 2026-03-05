@@ -195,9 +195,9 @@ export function useUploadDetail(uploadId: string) {
     let query = supabase
       .from("v_admin_campaign_contacts")
       .select(
-        "id,upload_id,row_no,company_name,given_name,family_name,email,normalized_phone,current_status,call_attempts,last_called_at,last_result_group,last_result_detail,last_note_text,assigned_to,assigned_name,assigned_at,lease_expires_at",
+        "id,upload_id,row_no,company_name,given_name,family_name,email,normalized_phone,current_status,call_attempts,last_called_at,last_result_group,last_result_detail,last_note_text,assigned_to,assigned_name,assigned_at,lease_expires_at,last_action_by,last_action_name,last_action_at",
         { count: "exact" }
-      )
+        )
       .eq("upload_id", uploadId);
 
     query = query.order(sortKey, { ascending: sortDir === "asc", nullsFirst: false });

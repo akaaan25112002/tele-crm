@@ -148,7 +148,14 @@ export default function ContactsTable(props: {
                         <div className="text-xs opacity-60">expires: {fmtDT(c.lease_expires_at)}</div>
                       </TableCell>
 
-                      <TableCell>{fmtDT(c.last_called_at)}</TableCell>
+                      <TableCell>
+                        <div className="font-medium">
+                            {c.last_action_name ?? "—"}
+                        </div>
+                        <div className="text-xs opacity-60">
+                            {fmtDT(c.last_action_at)}
+                        </div>
+                        </TableCell>
 
                       <TableCell>
                         <div className="text-sm font-medium break-words">{c.last_result_group ?? "—"}</div>

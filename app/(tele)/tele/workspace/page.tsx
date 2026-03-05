@@ -260,38 +260,29 @@ export default function TeleWorkspacePage() {
 
   // ===== Auth + role guard (match backend policy)
   const loadMe = async () => {
-    // getUser() ổn định hơn getSession() trong nhiều case RLS/refresh
     const { data: uData, error: uErr } = await supabase.auth.getUser();
     if (uErr) throw uErr;
+
     const uid = uData.user?.id ?? null;
     setMeId(uid);
 
     if (!uid) {
       setMeRole(null);
-      return;
+      return null;
     }
 
-    const { data: p, error: pErr } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", uid)
-      .single();
-
+    const { data: p, error: pErr } = await supabase.from("profiles").select("role").eq("id", uid).single();
     if (pErr) {
-      // profile missing => sẽ gây kick permissions; show hướng xử lý
       setMeRole(null);
-      throw new Error(
-        `Profile not found / permission denied. Ensure trigger creates profiles for new users and you inserted profiles.role. (${pErr.message})`
-      );
+      throw new Error(`Profile not found / permission denied. (${pErr.message})`);
     }
 
     const role = String((p as any)?.role ?? "");
     setMeRole(role);
 
-    // Tele page chỉ cho TELE
-    if (role !== "TELE") {
-      throw new Error(`Role mismatch: this page requires TELE but your role is "${role}".`);
-    }
+    if (role !== "TELE") throw new Error(`Role mismatch: requires TELE but your role is "${role}".`);
+
+    return uid;
   };
 
   const loadMeta = async () => {
@@ -316,10 +307,11 @@ export default function TeleWorkspacePage() {
     setResultMap(m);
   };
 
-  const loadQueue = async () => {
+  const loadQueue = async (uid?: string | null) => {
     setTopMsg(null);
 
-    if (!meId) {
+    const effectiveUid = uid ?? meId; // fallback
+    if (!effectiveUid) {
       setContacts([]);
       setActiveId(null);
       setTopMsg("Not authenticated");
@@ -328,50 +320,8 @@ export default function TeleWorkspacePage() {
 
     const { data, error } = await supabase
       .from("v_contacts_effective")
-      .select(
-        [
-          "id",
-          "external_person_id",
-          "company_name",
-          "given_name",
-          "family_name",
-          "telephone_number",
-          "mobile_country_code",
-          "mobile_number",
-          "normalized_phone",
-          "email",
-          "job_title",
-          "department",
-          "address_line1",
-          "address_line2",
-          "address_line3",
-          "city_ward",
-          "state",
-          "country",
-          "current_status",
-          "call_attempts",
-          "last_called_at",
-          "last_result_id",
-          "last_note_text",
-          "assigned_at",
-          "lease_expires_at",
-
-          "given_name_effective",
-          "family_name_effective",
-          "company_name_effective",
-          "email_effective",
-          "telephone_number_effective",
-          "mobile_country_code_effective",
-          "mobile_number_effective",
-          "address_line1_effective",
-          "address_line2_effective",
-          "address_line3_effective",
-          "city_ward_effective",
-          "state_effective",
-          "country_effective",
-        ].join(",")
-      )
-      .eq("assigned_to", meId)
+      .select("id,external_person_id,company_name,given_name,family_name,telephone_number,mobile_country_code,mobile_number,normalized_phone,email,job_title,department,address_line1,address_line2,address_line3,city_ward,state,country,current_status,call_attempts,last_called_at,last_result_id,last_note_text,assigned_at,lease_expires_at,given_name_effective,family_name_effective,company_name_effective,email_effective,telephone_number_effective,mobile_country_code_effective,mobile_number_effective,address_line1_effective,address_line2_effective,address_line3_effective,city_ward_effective,state_effective,country_effective")
+      .eq("assigned_to", effectiveUid)
       .gt("lease_expires_at", nowIso())
       .order("assigned_at", { ascending: true })
       .limit(100);
@@ -387,12 +337,8 @@ export default function TeleWorkspacePage() {
     const rows = ((data as any[]) ?? []) as Contact[];
     setContacts(rows);
 
-    if (!rows.length) {
-      setActiveId(null);
-      return;
-    }
-
     setActiveId((prev) => {
+      if (!rows.length) return null;
       if (!prev) return rows[0].id;
       if (!rows.find((x) => x.id === prev)) return rows[0].id;
       return prev;
@@ -423,6 +369,11 @@ export default function TeleWorkspacePage() {
     );
   };
 
+  const refreshQueue = async () => {
+    // dùng meId hiện tại
+    await loadQueue();
+  };
+
   // init
   useEffect(() => {
     const store = loadDraftStore();
@@ -430,9 +381,9 @@ export default function TeleWorkspacePage() {
 
     (async () => {
       try {
-        await loadMe();
+        const uid = await loadMe();   // ✅ lấy uid thật
         await loadMeta();
-        await loadQueue();
+        await loadQueue(uid);         // ✅ dùng uid, không phụ thuộc setState
       } catch (e: any) {
         console.error(e);
         setTopMsg(e?.message ?? "Init failed");
@@ -670,7 +621,7 @@ export default function TeleWorkspacePage() {
                 <CardTitle className="text-lg">
                   My Queue <span className="text-xs opacity-60">({contacts.length}/100)</span>
                 </CardTitle>
-                <Button variant="outline" size="sm" onClick={loadQueue} disabled={busy}>
+                <Button variant="outline" size="sm" onClick={() => void refreshQueue()} disabled={busy}>
                   Refresh
                 </Button>
               </div>
@@ -969,7 +920,7 @@ export default function TeleWorkspacePage() {
 
             <div className="shrink-0 border-t bg-background/90 backdrop-blur px-6 py-3 sticky bottom-0">
               <div className="flex items-center justify-end gap-2">
-                <Button variant="outline" onClick={loadQueue} disabled={busy}>
+                <Button variant="outline" onClick={() => void refreshQueue()} disabled={busy}>
                   Refresh
                 </Button>
                 <Button onClick={submitCall} disabled={busy || !leaseValid || !note1 || !note2}>

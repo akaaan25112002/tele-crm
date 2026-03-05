@@ -36,6 +36,10 @@ export type ContactRow = {
   assigned_name: string | null;
   assigned_at: string | null;
   lease_expires_at: string | null;
+
+  last_action_by: string | null;
+  last_action_name: string | null;
+  last_action_at: string | null;
 };
 
 export const CONTACT_STATUS_OPTIONS = ["ALL", "NEW", "ASSIGNED", "CALLBACK", "INVALID", "DONE"] as const;

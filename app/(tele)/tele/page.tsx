@@ -22,6 +22,16 @@ export default function TeleHome() {
   const [err, setErr] = useState<string | null>(null);
 
   const hasRows = useMemo(() => rows.length > 0, [rows]);
+  
+  type CampaignRow = {
+    id: string;
+    campaign_name: string;
+    description?: string | null;   // ➜ thêm dòng này
+    created_at: string;
+    status: string;
+    total_contacts?: number;
+    available_contacts?: number;
+  };
 
   const loadViaRpc = async (): Promise<CampaignRow[] | null> => {
     const { data, error } = await supabase.rpc("rpc_my_campaigns");
@@ -30,6 +40,7 @@ export default function TeleHome() {
     return ((data as any[]) ?? []).map((x) => ({
       id: String(x.id),
       campaign_name: String(x.campaign_name ?? ""),
+      description: x.description ?? null,      // ➜ thêm
       created_at: String(x.created_at),
       status: String(x.status),
       total_contacts: Number(x.total_contacts ?? 0),
@@ -50,7 +61,7 @@ export default function TeleHome() {
 
     const { data: us, error: usErr } = await supabase
       .from("uploads")
-      .select("id,campaign_name,created_at,status")
+      .select("id,campaign_name,description,created_at,status")  // ➜ thêm description
       .in("id", uploadIds)
       .order("created_at", { ascending: false });
 
@@ -59,6 +70,7 @@ export default function TeleHome() {
     return ((us as any[]) ?? []).map((u) => ({
       id: String(u.id),
       campaign_name: String(u.campaign_name ?? ""),
+      description: u.description ?? null,       // ➜ thêm
       created_at: String(u.created_at),
       status: String(u.status),
     }));
@@ -117,6 +129,10 @@ export default function TeleHome() {
               </CardHeader>
 
               <CardContent className="text-sm opacity-80 space-y-2">
+                <div className="text-sm text-muted-foreground leading-relaxed line-clamp-2">
+                  {u.description ?? "No description"}
+                </div>
+                
                 <div>Created: {new Date(u.created_at).toLocaleString()}</div>
 
                 {typeof u.total_contacts === "number" && typeof u.available_contacts === "number" ? (

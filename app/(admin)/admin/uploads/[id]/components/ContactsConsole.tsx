@@ -6,14 +6,23 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+
 import ContactsTable from "./ContactsTable";
 import AssignDialogs from "./AssignDialogs";
 
 import type { UploadDetailVM } from "../hooks/useUploadDetail";
-import type { ContactRow, SortKey, Tele } from "../lib/types";
 import { CONTACT_STATUS_OPTIONS } from "../lib/types";
 import { assigneeFilterToValue, assigneeValueToFilter } from "../lib/utils";
 import type { AdminEditorVM } from "../hooks/useAdminEditor";
+
+async function getMeId(): Promise<string | null> {
+  try {
+    const { data } = await supabase.auth.getSession();
+    return data.session?.user?.id ?? null;
+  } catch {
+    return null;
+  }
+}
 
 export default function ContactsConsole({ vm, editor }: { vm: UploadDetailVM; editor: AdminEditorVM }) {
   // assign dialogs state
@@ -64,23 +73,30 @@ export default function ContactsConsole({ vm, editor }: { vm: UploadDetailVM; ed
   };
 
   const releaseContact = async (contactId: string) => {
-    vm.tryCleanupExpiredLeases(); // fire and forget
-    // keep it similar to your old code
-    // status policy: release => NEW
-    (async () => {
-      // ignore errors? no.
-      try {
-        const { error } = await supabase
-          .from("contacts")
-          .update({ assigned_to: null, assigned_at: null, lease_expires_at: null, current_status: "NEW" })
-          .eq("id", contactId);
+    vm.tryCleanupExpiredLeases(); // ok to fire-and-forget
+    try {
+      const me = await getMeId();
+      const nowIso = new Date().toISOString();
 
-        if (error) throw error;
-        await Promise.all([vm.loadKpis(), vm.loadContacts()]);
-      } catch (e: any) {
-        alert(e?.message ?? "Release failed");
-      }
-    })();
+      const { error } = await supabase
+        .from("contacts")
+        .update({
+          assigned_to: null,
+          assigned_at: null,
+          lease_expires_at: null,
+          current_status: "NEW",
+
+          // ✅ keep audit even after release
+          last_action_by: me,
+          last_action_at: nowIso,
+        })
+        .eq("id", contactId);
+
+      if (error) throw error;
+      await Promise.all([vm.loadKpis(), vm.loadContacts()]);
+    } catch (e: any) {
+      alert(e?.message ?? "Release failed");
+    }
   };
 
   const confirmAssign = async () => {
@@ -88,6 +104,9 @@ export default function ContactsConsole({ vm, editor }: { vm: UploadDetailVM; ed
     if (!assignTeleId) return alert("Choose a tele");
 
     try {
+      const me = await getMeId();
+      const nowIso = new Date().toISOString();
+
       const leaseMs = 270 * 60 * 1000;
       const leaseIso = new Date(Date.now() + leaseMs).toISOString();
 
@@ -95,9 +114,13 @@ export default function ContactsConsole({ vm, editor }: { vm: UploadDetailVM; ed
         .from("contacts")
         .update({
           assigned_to: assignTeleId,
-          assigned_at: new Date().toISOString(),
+          assigned_at: nowIso,
           lease_expires_at: leaseIso,
           current_status: "ASSIGNED",
+
+          // ✅ audit for admin action
+          last_action_by: me,
+          last_action_at: nowIso,
         })
         .eq("id", assignContactId);
 
@@ -115,6 +138,9 @@ export default function ContactsConsole({ vm, editor }: { vm: UploadDetailVM; ed
     if (!bulkAssignTeleId) return alert("Choose a tele");
 
     try {
+      const me = await getMeId();
+      const nowIso = new Date().toISOString();
+
       const leaseMs = 270 * 60 * 1000;
       const leaseIso = new Date(Date.now() + leaseMs).toISOString();
 
@@ -123,9 +149,13 @@ export default function ContactsConsole({ vm, editor }: { vm: UploadDetailVM; ed
         .from("contacts")
         .update({
           assigned_to: bulkAssignTeleId,
-          assigned_at: new Date().toISOString(),
+          assigned_at: nowIso,
           lease_expires_at: leaseIso,
           current_status: "ASSIGNED",
+
+          // ✅ audit for admin action
+          last_action_by: me,
+          last_action_at: nowIso,
         })
         .in("id", ids);
 
@@ -144,10 +174,22 @@ export default function ContactsConsole({ vm, editor }: { vm: UploadDetailVM; ed
     if (!confirm(`Release ${selectedIds.size} contacts?`)) return;
 
     try {
+      const me = await getMeId();
+      const nowIso = new Date().toISOString();
+
       const ids = Array.from(selectedIds);
       const { error } = await supabase
         .from("contacts")
-        .update({ assigned_to: null, assigned_at: null, lease_expires_at: null, current_status: "NEW" })
+        .update({
+          assigned_to: null,
+          assigned_at: null,
+          lease_expires_at: null,
+          current_status: "NEW",
+
+          // ✅ audit for admin action
+          last_action_by: me,
+          last_action_at: nowIso,
+        })
         .in("id", ids);
 
       if (error) throw error;
