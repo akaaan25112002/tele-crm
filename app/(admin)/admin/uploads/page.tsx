@@ -32,7 +32,6 @@ function normalizeCampaignStatus(x: any): CampaignStatus {
   if (s === "PAUSE" || s === "PAUSED") return "PAUSE";
   if (s === "COMPLETED") return "COMPLETED";
   if (s === "DONE") return "DONE";
-  // fallback an toàn
   return "RUNNING";
 }
 
@@ -116,6 +115,203 @@ function asStringOrNull(x: any): string | null {
   return s ? s : null;
 }
 
+function normEmail(email?: string | null): string | null {
+  const s = String(email ?? "").trim().toLowerCase();
+  return s ? s : null;
+}
+
+function safeLower(x: any): string {
+  return String(x ?? "").trim().toLowerCase();
+}
+function safeRaw(x: any): string {
+  return String(x ?? "").trim();
+}
+
+/** client-safe sha256 */
+async function sha256Hex(input: string) {
+  const enc = new TextEncoder().encode(input);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * source_row_key: stable-ish fallback for tracing rows (not used for dedupe policy now)
+ */
+async function buildSourceRowKey(rr: Row) {
+  const external_person_id = safeRaw(pick(rr, ["person id", "personid", "external_person_id"]));
+  const email = safeLower(pick(rr, ["email"]));
+  const company = safeLower(pick(rr, ["company name", "company_name"]));
+  const given = safeLower(pick(rr, ["given name", "given_name"]));
+  const family = safeLower(pick(rr, ["family name", "family_name"]));
+
+  const tel = safeRaw(
+    pick(rr, ["telephone number", "telephone_number", "telephonenumber", "telephone", "phone", "telephone number "])
+  );
+  const cc = safeRaw(pick(rr, ["mobile country code", "mobile_country_code", "country code", "mobile cc"]));
+  const mn = safeRaw(pick(rr, ["mobile number", "mobile_number", "mobile", "mobile no", "mobile phone"]));
+
+  const job = safeLower(pick(rr, ["job title", "job_title"]));
+  const dept = safeLower(pick(rr, ["department"]));
+  const city = safeLower(pick(rr, ["city/ward", "city", "ward", "city_ward"]));
+  const state = safeLower(pick(rr, ["state"]));
+  const country = safeLower(pick(rr, ["country"]));
+
+  const parts = [
+    external_person_id || "",
+    email || "",
+    company || "",
+    given || "",
+    family || "",
+    tel || "",
+    cc || "",
+    mn || "",
+    job || "",
+    dept || "",
+    city || "",
+    state || "",
+    country || "",
+  ];
+
+  return sha256Hex(parts.join("|"));
+}
+
+type ContactInsert = {
+  upload_id: string;
+  row_no: number | null;
+  import_date: string | null;
+  current_status: string;
+
+  source_status: string | null;
+  external_person_id: string | null;
+
+  telephone_number: string | null;
+  mobile_country_code: string | null;
+  mobile_number: string | null;
+  normalized_phone: string | null;
+
+  company_name: string | null;
+  given_name: string | null;
+  family_name: string | null;
+  job_title: string | null;
+  department: string | null;
+  email: string | null;
+
+  address_line1: string | null;
+  address_line2: string | null;
+  address_line3: string | null;
+  city_ward: string | null;
+  state: string | null;
+  country: string | null;
+
+  normalized_email: string | null;
+  source_row_key: string | null;
+};
+
+type DropReason = "DEDUPE_TRIPLE";
+
+type ImportIssueRow = {
+  upload_id: string;
+  row_no: number | null;
+  reason: DropReason;
+  identity_key: string | null;
+  kept_row_no: number | null;
+  details: any;
+};
+
+function chunkify<T>(arr: T[], size: number) {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+function summarizeRow(x: ContactInsert) {
+  return {
+    row_no: x.row_no,
+    external_person_id: x.external_person_id,
+    normalized_email: x.normalized_email,
+    email: x.email,
+    normalized_phone: x.normalized_phone,
+    telephone_number: x.telephone_number,
+    company_name: x.company_name,
+    given_name: x.given_name,
+    family_name: x.family_name,
+    job_title: x.job_title,
+    department: x.department,
+    city_ward: x.city_ward,
+    state: x.state,
+    country: x.country,
+    source_row_key: x.source_row_key,
+  };
+}
+
+/**
+ * Dedupe ONLY when all 3 identities exist:
+ * external_person_id + normalized_email + normalized_phone
+ * last-row-wins
+ */
+function tripleKeyOf(x: ContactInsert): string | null {
+  const pid = (x.external_person_id ?? "").trim();
+  const em = (x.normalized_email ?? "").trim();
+  const ph = (x.normalized_phone ?? "").trim();
+
+  if (!pid || !em || !ph) return null;
+  return `${x.upload_id}||${pid}||${em}||${ph}`;
+}
+
+function auditDedupeTriple(uploadId: string, rows: ContactInsert[]) {
+  const keep = new Map<string, ContactInsert>();
+  const issues: ImportIssueRow[] = [];
+
+  for (const r of rows) {
+    const k = tripleKeyOf(r);
+    if (!k) continue;
+
+    const prev = keep.get(k);
+    if (prev) {
+      issues.push({
+        upload_id: uploadId,
+        row_no: prev.row_no ?? null,
+        reason: "DEDUPE_TRIPLE",
+        identity_key: k,
+        kept_row_no: r.row_no ?? null,
+        details: {
+          dropped: summarizeRow(prev),
+          kept: summarizeRow(r),
+          note: "Duplicate triple (PersonID + Email + Phone) in file; last row wins.",
+        },
+      });
+    }
+    keep.set(k, r);
+  }
+
+  // remove dropped ones from rows (only for triple-dup)
+  const droppedRowNos = new Set<number>();
+  for (const it of issues) {
+    if (typeof it.row_no === "number") droppedRowNos.add(it.row_no);
+  }
+
+  const keptRows = rows.filter((r) => !(typeof r.row_no === "number" && droppedRowNos.has(r.row_no)));
+
+  return { kept: keptRows, issues };
+}
+
+async function persistIssues(uploadId: string, issues: ImportIssueRow[]) {
+  // Always rewrite for upload_id (best effort)
+  try {
+    await supabase.from("contact_import_issues").delete().eq("upload_id", uploadId);
+  } catch {}
+
+  if (!issues.length) return;
+
+  const chunks = chunkify(issues, 500);
+  for (const ch of chunks) {
+    const { error } = await supabase.from("contact_import_issues").insert(ch);
+    if (error) throw new Error(`Save import audit failed: ${error.message}`);
+  }
+}
+
 export default function AdminUploadsPage() {
   const router = useRouter();
 
@@ -162,7 +358,6 @@ export default function AdminUploadsPage() {
     try {
       setLog("Parsing file...");
       const rows = await parseFile(file);
-
       if (!rows.length) throw new Error("File has no data rows.");
 
       setLog(`Creating upload record... (${rows.length} rows)`);
@@ -186,8 +381,11 @@ export default function AdminUploadsPage() {
       if (upErr) throw upErr;
       uploadId = String(upload.id);
 
-      const mapped = rows.map((r, idx) => {
-        const rr = normalizeRow(r);
+      setLog("Mapping rows (normalize phone/email + build source_row_key)...");
+      const mapped: ContactInsert[] = [];
+
+      for (let idx = 0; idx < rows.length; idx++) {
+        const rr = normalizeRow(rows[idx]);
 
         const tel = pick(rr, [
           "telephone number",
@@ -203,17 +401,25 @@ export default function AdminUploadsPage() {
         const normalized = buildNormalizedPhone(tel ? String(tel) : "", cc ? String(cc) : "", mn ? String(mn) : "");
         const normalized_phone = normalized && String(normalized).trim() ? String(normalized).trim() : null;
 
+        const email = asStringOrNull(pick(rr, ["email"]));
+        const normalized_email = normEmail(email);
+
         const rawDate = pick(rr, ["date", "import date", "import_date"]);
         const import_date = parseImportDate(rawDate);
 
-        return {
+        const external_person_id_raw = asStringOrNull(pick(rr, ["person id", "personid", "external_person_id"]));
+        const external_person_id = external_person_id_raw ? external_person_id_raw.trim() : null;
+
+        const source_row_key = await buildSourceRowKey(rr);
+
+        mapped.push({
           upload_id: uploadId,
           row_no: idx + 1,
           import_date,
           current_status: "NEW",
 
           source_status: asStringOrNull(pick(rr, ["status"])),
-          external_person_id: asStringOrNull(pick(rr, ["person id", "personid", "external_person_id"])),
+          external_person_id,
 
           telephone_number: asStringOrNull(tel),
           mobile_country_code: asStringOrNull(cc),
@@ -225,7 +431,7 @@ export default function AdminUploadsPage() {
           family_name: asStringOrNull(pick(rr, ["family name", "family_name"])),
           job_title: asStringOrNull(pick(rr, ["job title", "job_title"])),
           department: asStringOrNull(pick(rr, ["department"])),
-          email: asStringOrNull(pick(rr, ["email"])),
+          email,
 
           address_line1: asStringOrNull(pick(rr, ["address-line1", "address line1", "address_line1", "address 1"])),
           address_line2: asStringOrNull(pick(rr, ["address-line2", "address line2", "address_line2", "address 2"])),
@@ -233,38 +439,67 @@ export default function AdminUploadsPage() {
           city_ward: asStringOrNull(pick(rr, ["city/ward", "city", "ward", "city_ward"])),
           state: asStringOrNull(pick(rr, ["state"])),
           country: asStringOrNull(pick(rr, ["country"])),
-        };
-      });
 
-      const chunkSize = 500;
-      const totalChunks = Math.ceil(mapped.length / chunkSize);
-
-      setLog(`Inserting contacts in chunks of ${chunkSize}...`);
-
-      for (let i = 0; i < mapped.length; i += chunkSize) {
-        const chunkIndex = Math.floor(i / chunkSize) + 1;
-        const chunk = mapped.slice(i, i + chunkSize);
-
-        const { error } = await supabase.from("contacts").insert(chunk);
-        if (error) throw new Error(`Insert failed at chunk ${chunkIndex}/${totalChunks}: ${error.message}`);
-
-        setLog(`Inserted ${Math.min(i + chunkSize, mapped.length)}/${mapped.length} (chunk ${chunkIndex}/${totalChunks})`);
+          normalized_email,
+          source_row_key,
+        });
       }
 
-      setLog("Refreshing upload status...");
+      // ✅ DEDUPE ONLY triple (pid+email+phone)
+      const aud = auditDedupeTriple(uploadId, mapped);
+      const kept = aud.kept;
+      const issues = aud.issues;
+
+      setLog((prev) => prev + `\nAudit triple-duplicate issues: ${issues.length}`);
       try {
-        const { error: refreshErr } = await supabase.rpc("refresh_upload_status", { p_upload_id: uploadId });
-        if (refreshErr) {
-          console.warn("refresh_upload_status rpc failed:", refreshErr);
-          setLog((prev) => prev + `\n⚠ refresh_upload_status failed: ${refreshErr.message}`);
-        }
+        await persistIssues(uploadId, issues);
+        setLog((prev) => prev + `\nAudit saved ✅`);
       } catch (e: any) {
-        console.warn("refresh_upload_status unexpected:", e);
+        setLog((prev) => prev + `\n⚠ Audit save failed: ${e?.message ?? String(e)}`);
       }
 
-      setLog("Done ✅");
+      // payload stripping (keep your style; does not change policy now)
+      // NOTE: We no longer use A/B/C splitting by identity. We only keep these types to avoid accidental unique collisions
+      // if you still have legacy indexes in DB. However, the recommended DB index is only triple-unique, so this is optional.
+      type Payload = ContactInsert;
+      const payload: Payload[] = kept;
+
+      const upsertChunked = async <T extends Record<string, any>>(
+        label: string,
+        rowsToUpsert: T[],
+        onConflict: string,
+        ignoreDuplicates: boolean
+      ) => {
+        if (!rowsToUpsert.length) {
+          setLog((prev) => prev + `\n${label}: 0 rows (skip)`);
+          return;
+        }
+        const chunks = chunkify(rowsToUpsert, 500);
+        setLog((prev) => prev + `\n${label}: ${rowsToUpsert.length} rows → ${chunks.length} chunks`);
+
+        for (let i = 0; i < chunks.length; i++) {
+          const { error } = await supabase.from("contacts").upsert(chunks[i], { onConflict, ignoreDuplicates });
+          if (error) throw new Error(`${label} failed at chunk ${i + 1}/${chunks.length}: ${error.message}`);
+        }
+      };
+
+      setLog((prev) => prev + `\nUpserting contacts...`);
+
+      // ✅ This must match the DB unique index: uq_contacts_upload_pid_email_phone
+      // Will only conflict when ALL 3 exist and match.
+      const ON_CONFLICT = "upload_id,external_person_id,normalized_email,normalized_phone";
+
+      await upsertChunked("ALL) Insert rows (triple-dedupe only)", payload, ON_CONFLICT, true);
+
+      setLog((prev) => prev + "\nRefreshing upload status...");
+      try {
+        await supabase.rpc("refresh_upload_status", { p_upload_id: uploadId });
+      } catch {}
+
+      setLog((prev) => prev + "\nDone ✅ Redirecting to audit tab...");
       await load();
-      router.push(`/admin/uploads/${uploadId}`);
+
+      router.push(`/admin/uploads/${uploadId}?tab=audit`);
     } catch (e: any) {
       console.error(e);
       setLog(`Failed ❌\n${e?.message ?? String(e)}`);
