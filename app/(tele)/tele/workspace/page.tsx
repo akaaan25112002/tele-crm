@@ -383,7 +383,7 @@ export default function TeleWorkspacePage() {
 
     const opts = await loadCampaignOptions();
     const fresh = emptyAddForm();
-    if (opts.length) fresh.upload_id = opts[0].id; // ✅ default first campaign immediately
+    if (opts.length) fresh.upload_id = opts[0].id;
 
     setAddForm(fresh);
     setShowAdd(true);
@@ -509,6 +509,22 @@ export default function TeleWorkspacePage() {
     }
 
     const rows = (((data as any[]) ?? []) as any[]).map((x) => x as Contact);
+
+    // ✅ CALLBACK luôn xuống cuối queue
+    rows.sort((a, b) => {
+      const aIsCallback = (a.current_status ?? "").toUpperCase() === "CALLBACK";
+      const bIsCallback = (b.current_status ?? "").toUpperCase() === "CALLBACK";
+
+      if (aIsCallback !== bIsCallback) {
+        return aIsCallback ? 1 : -1;
+      }
+
+      const aAssigned = a.assigned_at ? new Date(a.assigned_at).getTime() : 0;
+      const bAssigned = b.assigned_at ? new Date(b.assigned_at).getTime() : 0;
+
+      return aAssigned - bAssigned;
+    });
+
     setContacts(rows);
 
     setActiveId((prev) => {
@@ -1159,12 +1175,11 @@ export default function TeleWorkspacePage() {
         </div>
       </div>
 
-      {/* ✅ Use AddContactDialog instead of duplicated modal */}
       <AddContactDialog
         open={showAdd}
         onOpenChange={setShowAdd}
         adding={adding}
-        addForm={addForm as any} // structural match; keep if TS complains due to private types
+        addForm={addForm as any}
         setAddForm={setAddForm as any}
         campaignOptions={campaignOptions as any}
         onCreate={createContact}
