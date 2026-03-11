@@ -11,6 +11,7 @@ import TeleAccessCard from "./components/TeleAccessCard";
 import ContactsConsole from "./components/ContactsConsole";
 import EditorDialog from "./components/EditorDialog";
 import ImportAuditConsole from "./components/ImportAuditConsole";
+import CampaignDashboard from "./components/CampaignDashboard";
 import { CampaignActionBar } from "./components/campaign-action-bar";
 
 type TabKey = "contacts" | "audit";
@@ -69,6 +70,12 @@ export default function UploadDetailPage() {
         }}
       />
 
+      <CampaignDashboard
+        uploadId={id}
+        campaignName={vm.upload?.campaign_name ?? null}
+        campaignStatus={vm.upload?.status ?? null}
+      />
+
       <TeleAccessCard vm={vm} />
 
       <div className="flex items-center gap-2">
@@ -81,7 +88,6 @@ export default function UploadDetailPage() {
         >
           Contacts
         </button>
-
         <button
           className={`px-3 py-1.5 rounded-md border text-sm ${
             tab === "audit" ? "bg-primary text-primary-foreground border-primary" : "bg-background"
@@ -91,7 +97,6 @@ export default function UploadDetailPage() {
         >
           Import Audit
         </button>
-
         <div className="text-xs opacity-60 ml-2">
           Tip: you can open audit directly via <span className="font-mono">?tab=audit</span>
         </div>
