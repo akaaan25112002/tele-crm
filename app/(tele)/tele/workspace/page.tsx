@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -11,9 +10,10 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { StatusBadge } from "@/components/status-badge";
 import { buildNormalizedPhone } from "@/lib/crm/phone";
-
-// ✅ Use the new dialog component
 import { AddContactDialog } from "@/components/AddContactDialog";
+
+const AUTO_REFRESH_MS = 60_000;
+const AUTO_REFRESH_COOLDOWN_MS = 20_000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -70,7 +70,6 @@ type Contact = {
   assigned_at?: string | null;
   lease_expires_at?: string | null;
 
-  // effective fields (optional)
   given_name_effective?: string | null;
   family_name_effective?: string | null;
   company_name_effective?: string | null;
@@ -157,7 +156,6 @@ function isTypingTarget(el: EventTarget | null) {
   return false;
 }
 
-// ===== Draft persistence =====
 const LS_KEY = "tele_drafts_v1";
 function loadDraftStore(): Record<string, Draft> {
   try {
@@ -184,11 +182,6 @@ function finalStatusBadge(fs?: FinalStatus | null) {
   return <Badge>{text}</Badge>;
 }
 
-/*
-==========================
-Add Contact model (match AddContactDialog props shape)
-==========================
-*/
 type CampaignOptionRow = { id: string; campaign_name: string };
 
 type AddFormState = {
@@ -249,9 +242,9 @@ function emptyAddForm(): AddFormState {
   };
 }
 
-export default function TeleWorkspacePage() {
-  const router = useRouter();
+type TopMsgKind = "success" | "error" | "info";
 
+export default function TeleWorkspacePage() {
   const [meId, setMeId] = useState<string | null>(null);
   const [meRole, setMeRole] = useState<string | null>(null);
 
@@ -261,25 +254,32 @@ export default function TeleWorkspacePage() {
   const [note1Options, setNote1Options] = useState<string[]>([]);
   const [note2Options, setNote2Options] = useState<CallResult[]>([]);
   const [note1, setNote1] = useState("");
-  const [note2, setNote2] = useState(""); // uuid
+  const [note2, setNote2] = useState("");
   const [noteText, setNoteText] = useState("");
 
   const [busy, setBusy] = useState(false);
+  const [reconcilingLeases, setReconcilingLeases] = useState(false);
+  const reconcileRunningRef = useRef(false);
+
+  const autoRefreshRunningRef = useRef(false);
+  const lastAutoRefreshAtRef = useRef(0);
+  const campaignIdsRef = useRef<string[]>([]);
+
   const [topMsg, setTopMsg] = useState<string | null>(null);
+  const [topMsgKind, setTopMsgKind] = useState<TopMsgKind>("info");
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
 
   const [draftById, setDraftById] = useState<Record<string, Draft>>({});
   const [resultMap, setResultMap] = useState<Record<string, { group: string; detail: string; final_status?: FinalStatus }>>(
     {}
   );
 
-  // Quick edit
   const [editField, setEditField] = useState<EditFieldKey>("email");
   const [editValue, setEditValue] = useState("");
   const [recentEdits, setRecentEdits] = useState<
     Array<{ field_name: string; old_value: string | null; new_value: string; edited_at: string }>
   >([]);
 
-  // Search
   const [q, setQ] = useState("");
   const debounceTimer = useRef<any>(null);
 
@@ -325,12 +325,10 @@ export default function TeleWorkspacePage() {
   const updateDraftState = (contactId: string, patch: Partial<Draft>) => {
     setDraftById((m) => {
       const prev = m[contactId] ?? { note1: "", note2Id: "", noteText: "" };
-      const next = { ...m, [contactId]: { ...prev, ...patch } };
-      return next;
+      return { ...m, [contactId]: { ...prev, ...patch } };
     });
   };
 
-  // autosave drafts (debounce 300ms)
   const scheduleDraftSave = (nextStore: Record<string, Draft>) => {
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
     debounceTimer.current = setTimeout(() => {
@@ -338,18 +336,22 @@ export default function TeleWorkspacePage() {
     }, 300);
   };
 
-  // ===== Add Contact state =====
   const [showAdd, setShowAdd] = useState(false);
   const [campaignOptions, setCampaignOptions] = useState<CampaignOptionRow[]>([]);
   const [addForm, setAddForm] = useState<AddFormState>(emptyAddForm());
   const [adding, setAdding] = useState(false);
 
-  // ✅ return opts so openAdd can default immediately (no stale state)
-  const loadCampaignOptions = async (): Promise<CampaignOptionRow[]> => {
+  const setBanner = useCallback((text: string | null, kind: TopMsgKind = "info") => {
+    setTopMsg(text);
+    setTopMsgKind(kind);
+  }, []);
+
+  const loadCampaignOptions = useCallback(async (): Promise<CampaignOptionRow[]> => {
     const { data: uData } = await supabase.auth.getUser();
     const uid = uData.user?.id ?? null;
     if (!uid) {
       setCampaignOptions([]);
+      campaignIdsRef.current = [];
       return [];
     }
 
@@ -361,6 +363,7 @@ export default function TeleWorkspacePage() {
     if (error) {
       console.error(error);
       setCampaignOptions([]);
+      campaignIdsRef.current = [];
       return [];
     }
 
@@ -375,22 +378,20 @@ export default function TeleWorkspacePage() {
       .map((x) => ({ id: x.id, campaign_name: x.campaign_name }));
 
     setCampaignOptions(opts);
+    campaignIdsRef.current = opts.map((x) => x.id);
     return opts;
-  };
+  }, []);
 
   const openAdd = async () => {
-    setTopMsg(null);
-
+    setBanner(null);
     const opts = await loadCampaignOptions();
     const fresh = emptyAddForm();
     if (opts.length) fresh.upload_id = opts[0].id;
-
     setAddForm(fresh);
     setShowAdd(true);
   };
 
-  // ===== Auth + role guard
-  const loadMe = async () => {
+  const loadMe = useCallback(async () => {
     const { data: uData, error: uErr } = await supabase.auth.getUser();
     if (uErr) throw uErr;
 
@@ -414,9 +415,9 @@ export default function TeleWorkspacePage() {
     if (role !== "TELE") throw new Error(`Role mismatch: requires TELE but your role is "${role}".`);
 
     return uid;
-  };
+  }, []);
 
-  const loadMeta = async () => {
+  const loadMeta = useCallback(async () => {
     const [{ data: gData, error: gErr }, { data: rData, error: rErr }] = await Promise.all([
       supabase.from("v_call_result_groups").select("group_name"),
       supabase.from("call_results").select("id,group_name,detail_name,final_status").eq("is_active", true),
@@ -436,106 +437,180 @@ export default function TeleWorkspacePage() {
       };
     });
     setResultMap(m);
-  };
+  }, []);
 
-  const loadQueue = async (uid?: string | null) => {
-    setTopMsg(null);
-
-    const effectiveUid = uid ?? meId;
-    if (!effectiveUid) {
-      setContacts([]);
-      setActiveId(null);
-      setTopMsg("Not authenticated");
-      return;
-    }
-
-    const { data, error } = await supabase
-      .from("v_contacts_effective")
-      .select(
-        [
-          "id",
-          "external_person_id",
-          "company_name",
-          "given_name",
-          "family_name",
-          "telephone_number",
-          "mobile_country_code",
-          "mobile_number",
-          "normalized_phone",
-          "email",
-          "email_second",
-          "job_title",
-          "department",
-          "address_line1",
-          "address_line2",
-          "address_line3",
-          "city_ward",
-          "state",
-          "country",
-          "current_status",
-          "call_attempts",
-          "last_called_at",
-          "last_result_id",
-          "last_note_text",
-          "assigned_at",
-          "lease_expires_at",
-          "given_name_effective",
-          "family_name_effective",
-          "company_name_effective",
-          "email_effective",
-          "email_second_effective",
-          "telephone_number_effective",
-          "mobile_country_code_effective",
-          "mobile_number_effective",
-          "address_line1_effective",
-          "address_line2_effective",
-          "address_line3_effective",
-          "city_ward_effective",
-          "state_effective",
-          "country_effective",
-        ].join(",")
-      )
-      .eq("assigned_to", effectiveUid)
-      .gt("lease_expires_at", nowIso())
-      .order("assigned_at", { ascending: true })
-      .limit(100);
-
-    if (error) {
-      console.error(error);
-      setTopMsg(error.message);
-      setContacts([]);
-      setActiveId(null);
-      return;
-    }
-
-    const rows = (((data as any[]) ?? []) as any[]).map((x) => x as Contact);
-
-    // ✅ CALLBACK luôn xuống cuối queue
-    rows.sort((a, b) => {
-      const aIsCallback = (a.current_status ?? "").toUpperCase() === "CALLBACK";
-      const bIsCallback = (b.current_status ?? "").toUpperCase() === "CALLBACK";
-
-      if (aIsCallback !== bIsCallback) {
-        return aIsCallback ? 1 : -1;
+  const loadQueue = useCallback(
+    async (uid?: string | null) => {
+      const effectiveUid = uid ?? meId;
+      if (!effectiveUid) {
+        setContacts([]);
+        setActiveId(null);
+        setBanner("Not authenticated", "error");
+        return;
       }
 
-      const aAssigned = a.assigned_at ? new Date(a.assigned_at).getTime() : 0;
-      const bAssigned = b.assigned_at ? new Date(b.assigned_at).getTime() : 0;
+      const { data, error } = await supabase
+        .from("v_contacts_effective")
+        .select(
+          [
+            "id",
+            "external_person_id",
+            "company_name",
+            "given_name",
+            "family_name",
+            "telephone_number",
+            "mobile_country_code",
+            "mobile_number",
+            "normalized_phone",
+            "email",
+            "email_second",
+            "job_title",
+            "department",
+            "address_line1",
+            "address_line2",
+            "address_line3",
+            "city_ward",
+            "state",
+            "country",
+            "current_status",
+            "call_attempts",
+            "last_called_at",
+            "last_result_id",
+            "last_note_text",
+            "assigned_at",
+            "lease_expires_at",
+            "given_name_effective",
+            "family_name_effective",
+            "company_name_effective",
+            "email_effective",
+            "email_second_effective",
+            "telephone_number_effective",
+            "mobile_country_code_effective",
+            "mobile_number_effective",
+            "address_line1_effective",
+            "address_line2_effective",
+            "address_line3_effective",
+            "city_ward_effective",
+            "state_effective",
+            "country_effective",
+          ].join(",")
+        )
+        .eq("assigned_to", effectiveUid)
+        .gt("lease_expires_at", nowIso())
+        .order("assigned_at", { ascending: true })
+        .limit(100);
 
-      return aAssigned - bAssigned;
-    });
+      if (error) {
+        console.error(error);
+        setBanner(error.message, "error");
+        setContacts([]);
+        setActiveId(null);
+        return;
+      }
 
-    setContacts(rows);
+      const rows = (((data as any[]) ?? []) as any[]).map((x) => x as Contact);
 
-    setActiveId((prev) => {
-      if (!rows.length) return null;
-      if (!prev) return rows[0].id;
-      if (!rows.find((z) => z.id === prev)) return rows[0].id;
-      return prev;
-    });
-  };
+      rows.sort((a, b) => {
+        const aIsCallback = (a.current_status ?? "").toUpperCase() === "CALLBACK";
+        const bIsCallback = (b.current_status ?? "").toUpperCase() === "CALLBACK";
 
-  const loadRecentEdits = async (contactId: string) => {
+        if (aIsCallback !== bIsCallback) {
+          return aIsCallback ? 1 : -1;
+        }
+
+        const aAssigned = a.assigned_at ? new Date(a.assigned_at).getTime() : 0;
+        const bAssigned = b.assigned_at ? new Date(b.assigned_at).getTime() : 0;
+
+        return aAssigned - bAssigned;
+      });
+
+      setContacts(rows);
+
+      setActiveId((prev) => {
+        if (!rows.length) return null;
+        if (!prev) return rows[0].id;
+        if (!rows.find((z) => z.id === prev)) return rows[0].id;
+        return prev;
+      });
+    },
+    [meId, setBanner]
+  );
+
+  const reconcileExpiredLeasesForCampaigns = useCallback(
+    async (campaignIds?: string[]) => {
+      const ids = (campaignIds?.length ? campaignIds : campaignIdsRef.current).filter(Boolean);
+
+      if (!ids.length) return 0;
+      if (reconcileRunningRef.current) return 0;
+
+      reconcileRunningRef.current = true;
+      setReconcilingLeases(true);
+
+      try {
+        const results = await Promise.all(
+          ids.map((id) =>
+            supabase.rpc("rpc_tele_reconcile_campaign_leases", {
+              p_upload_id: id,
+              p_limit: 1000,
+            })
+          )
+        );
+
+        let released = 0;
+        for (const r of results) {
+          if (r.error) throw r.error;
+          released += Number(r.data ?? 0);
+        }
+
+        return released;
+      } finally {
+        reconcileRunningRef.current = false;
+        setReconcilingLeases(false);
+      }
+    },
+    []
+  );
+
+  const refreshWorkspace = useCallback(
+    async (opts?: {
+      uid?: string | null;
+      campaignIds?: string[];
+      showReleasedMessage?: boolean;
+    }) => {
+      const released = await reconcileExpiredLeasesForCampaigns(opts?.campaignIds);
+
+      if (released > 0 && opts?.showReleasedMessage !== false) {
+        setBanner(
+          `${released} expired lease(s) were automatically released back to the campaign pool.`,
+          "success"
+        );
+      }
+
+      await loadQueue(opts?.uid);
+      setLastUpdatedAt(new Date().toISOString());
+    },
+    [loadQueue, reconcileExpiredLeasesForCampaigns, setBanner]
+  );
+
+  const safeAutoRefresh = useCallback(async () => {
+    if (document.visibilityState !== "visible") return;
+    if (busy || adding || reconcilingLeases) return;
+    if (autoRefreshRunningRef.current) return;
+
+    const now = Date.now();
+    if (now - lastAutoRefreshAtRef.current < AUTO_REFRESH_COOLDOWN_MS) return;
+
+    autoRefreshRunningRef.current = true;
+    lastAutoRefreshAtRef.current = now;
+
+    try {
+      await refreshWorkspace({ showReleasedMessage: false });
+    } finally {
+      autoRefreshRunningRef.current = false;
+    }
+  }, [busy, adding, reconcilingLeases, refreshWorkspace]);
+
+  const loadRecentEdits = useCallback(async (contactId: string) => {
     const { data, error } = await supabase
       .from("contact_edits")
       .select("field_name,old_value,new_value,edited_at")
@@ -557,13 +632,12 @@ export default function TeleWorkspacePage() {
         edited_at: String(x.edited_at),
       }))
     );
-  };
+  }, []);
 
   const refreshQueue = async () => {
-    await loadQueue();
+    await refreshWorkspace({ showReleasedMessage: true });
   };
 
-  // init
   useEffect(() => {
     const store = loadDraftStore();
     setDraftById(store);
@@ -572,21 +646,23 @@ export default function TeleWorkspacePage() {
       try {
         const uid = await loadMe();
         await loadMeta();
-        await loadQueue(uid);
-        await loadCampaignOptions();
+        const opts = await loadCampaignOptions();
+        await refreshWorkspace({
+          uid,
+          campaignIds: opts.map((x) => x.id),
+          showReleasedMessage: false,
+        });
       } catch (e: any) {
         console.error(e);
-        setTopMsg(e?.message ?? "Init failed");
+        setBanner(e?.message ?? "Init failed", "error");
       }
     })();
 
     return () => {
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadMe, loadMeta, loadCampaignOptions, refreshWorkspace, setBanner]);
 
-  // hotkeys
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const typing = isTypingTarget(e.target);
@@ -617,7 +693,6 @@ export default function TeleWorkspacePage() {
     return () => window.removeEventListener("keydown", onKeyDown, { capture: true } as any);
   }, [activeId, filteredContacts]);
 
-  // when note1 changes -> load note2 list + auto pick
   useEffect(() => {
     if (!activeId) return;
 
@@ -665,10 +740,8 @@ export default function TeleWorkspacePage() {
         return next;
       });
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [note1]);
+  }, [note1, activeId]);
 
-  // when active changes -> restore draft + prefill note1/note2
   useEffect(() => {
     if (!active) return;
 
@@ -692,19 +765,48 @@ export default function TeleWorkspacePage() {
 
     setEditValue(getEffective(active, editField));
     void loadRecentEdits(active.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId]);
+  }, [activeId, active, draftById, resultMap, editField, loadRecentEdits]);
 
   useEffect(() => {
     if (!active) return;
     setEditValue(getEffective(active, editField));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editField]);
+  }, [editField, active]);
 
   useEffect(() => {
     scheduleDraftSave(draftById);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftById]);
+
+  useEffect(() => {
+    if (!topMsg) return;
+    const t = window.setTimeout(() => setTopMsg(null), topMsgKind === "error" ? 7000 : 4000);
+    return () => window.clearTimeout(t);
+  }, [topMsg, topMsgKind]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void safeAutoRefresh();
+    }, AUTO_REFRESH_MS);
+
+    return () => window.clearInterval(timer);
+  }, [safeAutoRefresh]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      void safeAutoRefresh();
+    };
+
+    const onFocus = () => {
+      void safeAutoRefresh();
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [safeAutoRefresh]);
 
   const submitCall = async () => {
     if (!active) return;
@@ -713,7 +815,7 @@ export default function TeleWorkspacePage() {
     if (!note2) return alert("No Note 2 available. Ask admin to seed call_results (including (general)).");
 
     setBusy(true);
-    setTopMsg(null);
+    setBanner(null);
 
     try {
       const { error } = await supabase.rpc("rpc_submit_call", {
@@ -734,14 +836,17 @@ export default function TeleWorkspacePage() {
 
       setNoteText("");
       await loadQueue();
+      setLastUpdatedAt(new Date().toISOString());
+      setBanner("Call submitted successfully.", "success");
     } catch (e: any) {
       const m = e?.message ?? "Submit failed";
-      setTopMsg(m);
+      setBanner(m, "error");
       alert(m);
 
       const low = String(m).toLowerCase();
       if (low.includes("lease") || low.includes("owner") || low.includes("not owner")) {
         await loadQueue();
+        setLastUpdatedAt(new Date().toISOString());
       }
     } finally {
       setBusy(false);
@@ -755,7 +860,7 @@ export default function TeleWorkspacePage() {
     if (!v) return alert("New value is required");
 
     setBusy(true);
-    setTopMsg(null);
+    setBanner(null);
 
     try {
       const { error } = await supabase.rpc("rpc_contact_edit", {
@@ -766,9 +871,11 @@ export default function TeleWorkspacePage() {
       if (error) throw error;
 
       await Promise.all([loadQueue(), loadRecentEdits(active.id)]);
+      setLastUpdatedAt(new Date().toISOString());
+      setBanner(`Updated ${editField} successfully.`, "success");
     } catch (e: any) {
       const m = e?.message ?? "Edit failed";
-      setTopMsg(m);
+      setBanner(m, "error");
       alert(m);
     } finally {
       setBusy(false);
@@ -778,7 +885,7 @@ export default function TeleWorkspacePage() {
   const createContact = async () => {
     if (!addForm.upload_id) return alert("Please choose campaign");
     setAdding(true);
-    setTopMsg(null);
+    setBanner(null);
 
     try {
       const normalized_phone =
@@ -824,9 +931,11 @@ export default function TeleWorkspacePage() {
 
       await loadQueue();
       setActiveId(newId);
+      setLastUpdatedAt(new Date().toISOString());
+      setBanner("Contact created and assigned to your queue.", "success");
     } catch (e: any) {
       const m = e?.message ?? "Add contact failed";
-      setTopMsg(m);
+      setBanner(m, "error");
       alert(m);
     } finally {
       setAdding(false);
@@ -849,22 +958,44 @@ export default function TeleWorkspacePage() {
   return (
     <div className="min-h-full">
       <div className="flex flex-col gap-3">
-        {topMsg && <div className="text-sm text-red-600 whitespace-pre-wrap">{topMsg}</div>}
+        {topMsg && (
+          <div
+            className={`rounded-lg border px-3 py-2 text-sm whitespace-pre-wrap ${
+              topMsgKind === "success"
+                ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300"
+                : topMsgKind === "error"
+                ? "border-destructive/40 text-destructive"
+                : "border-border bg-muted/40"
+            }`}
+          >
+            {topMsg}
+          </div>
+        )}
+
         {roleWarn && <div className="text-sm text-red-600 whitespace-pre-wrap">{roleWarn}</div>}
 
+        <div className="flex items-center justify-between text-xs opacity-60">
+          <div>Last updated: {lastUpdatedAt ? fmtDT(lastUpdatedAt) : "—"}</div>
+          <div>{reconcilingLeases ? "Reconciling expired leases..." : "Lease reconciliation active"}</div>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* Queue */}
-          <Card className="md:col-span-1 flex flex-col">
+          <Card className="md:col-span-1 flex flex-col min-h-0">
             <CardHeader className="flex flex-col gap-3">
               <div className="flex flex-row items-center justify-between">
                 <CardTitle className="text-lg">
                   My Queue <span className="text-xs opacity-60">({contacts.length}/100)</span>
                 </CardTitle>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={() => void refreshQueue()} disabled={busy}>
-                    Refresh
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void refreshQueue()}
+                    disabled={busy || adding || reconcilingLeases}
+                  >
+                    {reconcilingLeases ? "Syncing..." : "Refresh"}
                   </Button>
-                  <Button size="sm" onClick={() => void openAdd()} disabled={busy}>
+                  <Button size="sm" onClick={() => void openAdd()} disabled={busy || adding || reconcilingLeases}>
                     Add Contact
                   </Button>
                 </div>
@@ -909,9 +1040,7 @@ export default function TeleWorkspacePage() {
 
                     <div className="text-xs opacity-70 mt-1">Tel: {c.telephone_number_effective ?? c.telephone_number ?? "—"}</div>
                     <div className="text-xs opacity-70 mt-1">• Mobile: {c.normalized_phone ?? "—"}</div>
-                    <div className="text-xs opacity-70 mt-1">
-                      • Email2: {c.email_second_effective ?? c.email_second ?? "—"}
-                    </div>
+                    <div className="text-xs opacity-70 mt-1">• Email2: {c.email_second_effective ?? c.email_second ?? "—"}</div>
                     <div className="text-xs opacity-70 mt-1">• attempts: {c.call_attempts ?? 0}</div>
                     <div className="text-xs opacity-70 mt-1">Lease: {leaseText}</div>
                   </button>
@@ -926,8 +1055,7 @@ export default function TeleWorkspacePage() {
             </CardContent>
           </Card>
 
-          {/* Call panel */}
-          <Card className="md:col-span-2 flex flex-col">
+          <Card className="md:col-span-2 flex flex-col min-h-0">
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle className="text-lg">Call Panel</CardTitle>
               <div className="text-xs opacity-70">
@@ -943,7 +1071,6 @@ export default function TeleWorkspacePage() {
                 <div className="text-sm opacity-70">Select a contact from queue.</div>
               ) : (
                 <>
-                  {/* Info */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div className="p-3 rounded-lg border">
                       <div className="text-xs opacity-70 mt-2">Person ID</div>
@@ -1008,7 +1135,6 @@ export default function TeleWorkspacePage() {
                     </div>
                   </div>
 
-                  {/* Agent Edit */}
                   <div className="rounded-lg border p-3 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="font-medium">Agent Edit (log-only)</div>
@@ -1068,7 +1194,6 @@ export default function TeleWorkspacePage() {
                     )}
                   </div>
 
-                  {/* Call Result */}
                   <div className="rounded-lg border p-3 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="font-medium">Call Result</div>
@@ -1163,8 +1288,12 @@ export default function TeleWorkspacePage() {
 
             <div className="shrink-0 border-t bg-background/90 backdrop-blur px-6 py-3 sticky bottom-0">
               <div className="flex items-center justify-end gap-2">
-                <Button variant="outline" onClick={() => void refreshQueue()} disabled={busy}>
-                  Refresh
+                <Button
+                  variant="outline"
+                  onClick={() => void refreshQueue()}
+                  disabled={busy || adding || reconcilingLeases}
+                >
+                  {reconcilingLeases ? "Syncing..." : "Refresh"}
                 </Button>
                 <Button onClick={submitCall} disabled={busy || !leaseValid || !note1 || !note2}>
                   {busy ? "Saving..." : "Submit call"}

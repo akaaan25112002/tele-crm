@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,8 +28,28 @@ type ProgressTele = {
   earliest_my_expiry: string | null;
 };
 
+type CampaignInfo = {
+  id: string;
+  campaign_name: string | null;
+  description: string | null;
+  filename: string | null;
+};
+
+type MsgKind = "success" | "error" | "info";
+
+const AUTO_REFRESH_MS = 60_000;
+const LEASE_MINUTES = 270; // 4h30
+const PULL_MAX = 100;
+
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
+}
+
+function fmtDT(s?: string | null) {
+  if (!s) return "—";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString();
 }
 
 export default function CampaignPullPage() {
@@ -42,28 +62,28 @@ export default function CampaignPullPage() {
   }, [params]);
 
   const [loading, setLoading] = useState(false);
+  const [statusLoading, setStatusLoading] = useState(false);
+  const [pLoading, setPLoading] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
+
   const [msg, setMsg] = useState<string | null>(null);
+  const [msgKind, setMsgKind] = useState<MsgKind>("info");
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
 
   const [status, setStatus] = useState<CampaignStatus | null>(null);
-  const [statusLoading, setStatusLoading] = useState(false);
-
-  const [p, setP] = useState<ProgressTele | null>(null);
-  const [pLoading, setPLoading] = useState(false);
-
-  const LEASE_MINUTES = 270; // 4h30
-  const PULL_MAX = 100;
-
-  type CampaignInfo = {
-    id: string;
-    campaign_name: string | null;
-    description: string | null;
-    filename: string | null;
-  };
-
   const [campaign, setCampaign] = useState<CampaignInfo | null>(null);
+  const [p, setP] = useState<ProgressTele | null>(null);
 
-  const loadCampaign = async () => {
+  const reconcileRunningRef = useRef(false);
+
+  const setBanner = useCallback((text: string | null, kind: MsgKind = "info") => {
+    setMsg(text);
+    setMsgKind(kind);
+  }, []);
+
+  const loadCampaign = useCallback(async () => {
     if (!id) return;
+
     setStatusLoading(true);
     try {
       const { data, error } = await supabase
@@ -83,16 +103,17 @@ export default function CampaignPullPage() {
       });
     } catch (e: any) {
       console.error(e);
-      setMsg(e?.message ?? "Load campaign failed");
+      setBanner(e?.message ?? "Load campaign failed", "error");
       setStatus(null);
       setCampaign(null);
     } finally {
       setStatusLoading(false);
     }
-  };
+  }, [id, setBanner]);
 
-  const loadProgress = async () => {
+  const loadProgress = useCallback(async () => {
     if (!id) return;
+
     setPLoading(true);
     try {
       const { data, error } = await supabase.rpc("rpc_campaign_progress_tele", {
@@ -100,7 +121,6 @@ export default function CampaignPullPage() {
       });
       if (error) throw error;
 
-      // Supabase RPC can return array (setof) or object; normalize to 1 row
       const row = Array.isArray(data) ? data[0] : data;
 
       if (!row || typeof row !== "object") {
@@ -127,37 +147,153 @@ export default function CampaignPullPage() {
       });
     } catch (e: any) {
       console.error(e);
-      setMsg(e?.message ?? "Load progress failed");
+      setBanner(e?.message ?? "Load progress failed", "error");
       setP(null);
     } finally {
       setPLoading(false);
     }
-  };
+  }, [id, setBanner]);
+
+  const refreshPage = useCallback(
+    async (showMessage = false) => {
+      if (!id) return;
+
+      if (showMessage) setBanner(null);
+
+      await Promise.all([loadCampaign(), loadProgress()]);
+      setLastUpdatedAt(new Date().toISOString());
+
+      if (showMessage) {
+        setBanner("Campaign status and progress refreshed.", "info");
+      }
+    },
+    [id, loadCampaign, loadProgress, setBanner]
+  );
+
+  const reconcileExpiredLeases = useCallback(
+    async (showMessage = false) => {
+      if (!id) return 0;
+      if (reconcileRunningRef.current) return 0;
+
+      reconcileRunningRef.current = true;
+      setReconciling(true);
+
+      try {
+        const { data, error } = await supabase.rpc("rpc_tele_reconcile_campaign_leases", {
+          p_upload_id: id,
+          p_limit: 1000,
+        });
+
+        if (error) throw error;
+
+        const released = Number(data ?? 0);
+
+        if (showMessage) {
+          if (released > 0) {
+            setBanner(
+              `${released} expired lease(s) were automatically released back to this campaign pool.`,
+              "success"
+            );
+          } else {
+            setBanner("No expired leases found for this campaign.", "info");
+          }
+        }
+
+        return released;
+      } catch (e: any) {
+        console.error(e);
+        setBanner(e?.message ?? "Failed to reconcile expired leases", "error");
+        return 0;
+      } finally {
+        reconcileRunningRef.current = false;
+        setReconciling(false);
+      }
+    },
+    [id, setBanner]
+  );
 
   useEffect(() => {
     if (!id) return;
+
     (async () => {
-      setMsg(null);
-      await Promise.all([loadCampaign(), loadProgress()]);
+      setBanner(null);
+      await reconcileExpiredLeases(false);
+      await refreshPage(false);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, reconcileExpiredLeases, refreshPage, setBanner]);
+
+  useEffect(() => {
+    if (!msg) return;
+
+    const timeout = window.setTimeout(() => {
+      setMsg(null);
+    }, msgKind === "error" ? 7000 : 4000);
+
+    return () => window.clearTimeout(timeout);
+  }, [msg, msgKind]);
+
+  useEffect(() => {
+    const tick = () => {
+      if (document.visibilityState === "visible" && !loading && !reconciling) {
+        void (async () => {
+          await reconcileExpiredLeases(false);
+          await refreshPage(false);
+        })();
+      }
+    };
+
+    const timer = window.setInterval(tick, AUTO_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [loading, reconciling, reconcileExpiredLeases, refreshPage]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && !loading && !reconciling) {
+        void (async () => {
+          await reconcileExpiredLeases(false);
+          await refreshPage(false);
+        })();
+      }
+    };
+
+    const onFocus = () => {
+      if (document.visibilityState === "visible" && !loading && !reconciling) {
+        void (async () => {
+          await reconcileExpiredLeases(false);
+          await refreshPage(false);
+        })();
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [loading, reconciling, reconcileExpiredLeases, refreshPage]);
 
   const disabledByStatus = status === "PAUSE" || status === "DONE";
 
   const computedPullLimit = useMemo(() => {
-    // ✅ if progress is loaded, respect capacity_left; otherwise allow up to PULL_MAX and let RPC decide
     const cap = p ? clamp(Number(p.capacity_left ?? 0), 0, PULL_MAX) : PULL_MAX;
     return cap;
   }, [p]);
 
   const disabledByProgress = useMemo(() => {
-    if (!p) return false; // if progress not loaded, still allow pull (RPC will decide)
+    if (!p) return false;
     return Number(p.capacity_left ?? 0) <= 0 || Number(p.available_now ?? 0) <= 0;
   }, [p]);
 
   const pullDisabled =
-    loading || !id || statusLoading || disabledByStatus || disabledByProgress || computedPullLimit <= 0;
+    loading ||
+    reconciling ||
+    !id ||
+    statusLoading ||
+    disabledByStatus ||
+    disabledByProgress ||
+    computedPullLimit <= 0;
 
   const pullHint = useMemo(() => {
     if (disabledByStatus) return "Campaign disabled";
@@ -170,13 +306,25 @@ export default function CampaignPullPage() {
 
   const pull = async () => {
     if (!id) return;
+
     setLoading(true);
-    setMsg(null);
+    setBanner(null);
 
     try {
-      const limit = computedPullLimit;
+      await reconcileExpiredLeases(false);
+      await loadProgress();
+
+      const latestCapacity = p ? clamp(Number(p.capacity_left ?? 0), 0, PULL_MAX) : computedPullLimit;
+      const latestAvailable = p ? Number(p.available_now ?? 0) : 0;
+      const limit = latestCapacity;
+
       if (limit <= 0) {
-        setMsg("You already hold maximum contacts (100). Please submit calls to free capacity.");
+        setBanner("You already hold maximum contacts (100). Please submit calls to free capacity.", "error");
+        return;
+      }
+
+      if (p && latestAvailable <= 0) {
+        setBanner("No contacts available to pull right now.", "info");
         return;
       }
 
@@ -188,27 +336,26 @@ export default function CampaignPullPage() {
 
       if (error) throw error;
 
-      // ✅ RPC might return array rows OR a number depending on implementation
       let pulled = 0;
       if (Array.isArray(data)) pulled = data.length;
       else if (typeof data === "number") pulled = data;
 
-      await loadProgress();
+      await refreshPage(false);
 
       if (pulled === 0) {
-        setMsg("No contacts available to pull right now.");
+        setBanner("No contacts available to pull right now.", "info");
         return;
       }
 
-      setMsg(`Pulled ${pulled} contacts`);
-      // small delay avoids UI race & gives feedback
+      setBanner(`Pulled ${pulled} contacts successfully. Redirecting to workspace...`, "success");
+
       setTimeout(() => {
         router.push("/tele/workspace");
       }, 500);
     } catch (e: any) {
       console.error(e);
-      setMsg(e?.message ?? "Pull failed");
-      await Promise.all([loadCampaign(), loadProgress()]);
+      setBanner(e?.message ?? "Pull failed", "error");
+      await refreshPage(false);
     } finally {
       setLoading(false);
     }
@@ -221,43 +368,66 @@ export default function CampaignPullPage() {
       <CardHeader>
         <CardTitle className="flex items-center justify-between gap-2">
           <span>Pull Contacts</span>
+          <div className="flex items-center gap-2 text-xs opacity-70">
+            <span>Last updated: {lastUpdatedAt ? fmtDT(lastUpdatedAt) : "—"}</span>
+            <span>•</span>
+            <span>{reconciling ? "Reconciling leases..." : "Lease sync active"}</span>
+          </div>
         </CardTitle>
       </CardHeader>
 
       <CardContent className="space-y-4">
         <div className="flex items-center justify-between gap-3">
-            <div className="font-medium">
-              {campaign?.campaign_name ?? "—"}
-            </div>
-            {campaign?.filename ? (
-              <Badge variant="outline">{campaign.filename}</Badge>
-            ) : null}
-          </div>
+          <div className="font-medium">{campaign?.campaign_name ?? "—"}</div>
+          {campaign?.filename ? <Badge variant="outline">{campaign.filename}</Badge> : null}
+        </div>
+
         <div className="text-sm opacity-80">Campaign ID: {id || "—"}</div>
 
         <div className="text-sm opacity-80 flex items-center gap-2">
           <span>Status:</span>
-          {statusLoading ? <span>Loading...</span> : status ? <StatusBadge status={status} kind="campaign" /> : <span>—</span>}
+          {statusLoading ? (
+            <span>Loading...</span>
+          ) : status ? (
+            <StatusBadge status={status} kind="campaign" />
+          ) : (
+            <span>—</span>
+          )}
         </div>
 
-        <div className="text-sm opacity-80 whitespace-pre-wrap"><span>Description: </span>
+        <div className="text-sm opacity-80 whitespace-pre-wrap">
+          <span>Description: </span>
           {statusLoading ? "Loading description..." : campaign?.description?.trim() ? campaign.description : "No description."}
         </div>
 
-        {/* Progress (tele-grade, not noisy) */}
         <div className="rounded-lg border p-3">
           <div className="flex items-center justify-between">
             <div className="font-medium">Progress</div>
-            <Button variant="outline" size="sm" onClick={() => void loadProgress()} disabled={pLoading || !id}>
-              {pLoading ? "Loading..." : "Refresh"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void reconcileExpiredLeases(true)}
+                disabled={reconciling || loading || !id}
+              >
+                {reconciling ? "Syncing..." : "Sync Leases"}
+              </Button>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void refreshPage(true)}
+                disabled={pLoading || reconciling || loading || !id}
+              >
+                {pLoading ? "Loading..." : "Refresh"}
+              </Button>
+            </div>
           </div>
 
           {!p ? (
             <div className="text-sm opacity-70 mt-2">Progress not available.</div>
           ) : (
             <div className="mt-3 space-y-3">
-              {/* Primary */}
               <div className="flex flex-wrap items-center gap-2 text-sm">
                 <Badge variant="outline">Total: {p.total_contacts}</Badge>
                 <Badge variant="outline">Done: {p.done_contacts}</Badge>
@@ -269,7 +439,6 @@ export default function CampaignPullPage() {
                 <div className="h-2 bg-primary" style={{ width: `${donePercent}%` }} />
               </div>
 
-              {/* Tele ops essentials */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
                 <div className="rounded-md border p-2">
                   <div className="text-xs opacity-60">Available now</div>
@@ -294,8 +463,7 @@ export default function CampaignPullPage() {
 
               {p.earliest_my_expiry && (
                 <div className="text-xs opacity-70">
-                  Earliest expiry (mine):{" "}
-                  <span className="font-medium">{new Date(p.earliest_my_expiry).toLocaleString()}</span>
+                  Earliest expiry (mine): <span className="font-medium">{fmtDT(p.earliest_my_expiry)}</span>
                 </div>
               )}
 
@@ -312,7 +480,13 @@ export default function CampaignPullPage() {
 
         <div className="flex items-center gap-3">
           <Button onClick={pull} disabled={pullDisabled}>
-            {disabledByStatus ? "Campaign disabled" : loading ? "Pulling..." : `Pull ${computedPullLimit || PULL_MAX}`}
+            {disabledByStatus
+              ? "Campaign disabled"
+              : reconciling
+              ? "Syncing..."
+              : loading
+              ? "Pulling..."
+              : `Pull ${computedPullLimit || PULL_MAX}`}
           </Button>
 
           <div className="text-xs opacity-70">
@@ -321,7 +495,20 @@ export default function CampaignPullPage() {
         </div>
 
         {pullHint && <div className="text-sm text-amber-700 whitespace-pre-wrap">{pullHint}</div>}
-        {msg && <div className="text-sm whitespace-pre-wrap">{msg}</div>}
+
+        {msg ? (
+          <div
+            className={`text-sm whitespace-pre-wrap rounded-lg border px-3 py-2 ${
+              msgKind === "success"
+                ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300"
+                : msgKind === "error"
+                ? "border-destructive/40 text-destructive"
+                : "border-border bg-muted/40"
+            }`}
+          >
+            {msg}
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );

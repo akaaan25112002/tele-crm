@@ -11,6 +11,7 @@ import TeleAccessCard from "./components/TeleAccessCard";
 import ContactsConsole from "./components/ContactsConsole";
 import EditorDialog from "./components/EditorDialog";
 import ImportAuditConsole from "./components/ImportAuditConsole";
+import { CampaignActionBar } from "./components/campaign-action-bar";
 
 type TabKey = "contacts" | "audit";
 
@@ -30,7 +31,6 @@ export default function UploadDetailPage() {
   const initialTab = useMemo(() => normTab(sp.get("tab")), [sp]);
   const [tab, setTab] = useState<TabKey>(initialTab);
 
-  // keep tab synced with URL changes
   useEffect(() => {
     setTab(normTab(sp.get("tab")));
   }, [sp]);
@@ -41,7 +41,6 @@ export default function UploadDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // reload contacts when filters change (tách khỏi refreshAll)
   useEffect(() => {
     (async () => {
       if (!id) return;
@@ -61,9 +60,17 @@ export default function UploadDetailPage() {
     <div className="space-y-4">
       <CampaignHeader vm={vm} />
       <CampaignKpis vm={vm} />
+
+      <CampaignActionBar
+        uploadId={id}
+        campaignStatus={vm.upload?.status ?? null}
+        onAfterCleanup={async () => {
+          await vm.refreshAll();
+        }}
+      />
+
       <TeleAccessCard vm={vm} />
 
-      {/* Tabs */}
       <div className="flex items-center gap-2">
         <button
           className={`px-3 py-1.5 rounded-md border text-sm ${
@@ -74,6 +81,7 @@ export default function UploadDetailPage() {
         >
           Contacts
         </button>
+
         <button
           className={`px-3 py-1.5 rounded-md border text-sm ${
             tab === "audit" ? "bg-primary text-primary-foreground border-primary" : "bg-background"
@@ -83,19 +91,18 @@ export default function UploadDetailPage() {
         >
           Import Audit
         </button>
+
         <div className="text-xs opacity-60 ml-2">
           Tip: you can open audit directly via <span className="font-mono">?tab=audit</span>
         </div>
       </div>
 
-      {/* Content */}
       {tab === "audit" ? (
         <ImportAuditConsole uploadId={id} />
       ) : (
         <ContactsConsole vm={vm} editor={editor} />
       )}
 
-      {/* ✅ OPTIMAL: EditorDialog at page level */}
       <EditorDialog
         vm={editor}
         onSaved={async () => {

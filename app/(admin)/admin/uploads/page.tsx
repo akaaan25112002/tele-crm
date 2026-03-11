@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { supabase } from "@/lib/supabase/client";
@@ -12,6 +12,8 @@ import { Input } from "@/components/ui/input";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 type CampaignStatus = "RUNNING" | "PAUSE" | "COMPLETED" | "DONE";
 
@@ -25,6 +27,15 @@ type Upload = {
 };
 
 type Row = Record<string, any>;
+
+type SortKey =
+  | "created_desc"
+  | "created_asc"
+  | "name_asc"
+  | "name_desc"
+  | "rows_desc"
+  | "rows_asc"
+  | "issues_desc";
 
 function normalizeCampaignStatus(x: any): CampaignStatus {
   const s = String(x ?? "").trim().toUpperCase();
@@ -88,7 +99,6 @@ function pick(r: Row, keys: string[]) {
 function parseImportDate(raw: any): string | null {
   if (raw === null || raw === undefined || raw === "") return null;
 
-  // Excel date number
   if (typeof raw === "number" && isFinite(raw)) {
     const utc = Math.round((raw - 25569) * 86400 * 1000);
     const d = new Date(utc);
@@ -127,7 +137,6 @@ function safeRaw(x: any): string {
   return String(x ?? "").trim();
 }
 
-/** client-safe sha256 */
 async function sha256Hex(input: string) {
   const enc = new TextEncoder().encode(input);
   const buf = await crypto.subtle.digest("SHA-256", enc);
@@ -136,13 +145,6 @@ async function sha256Hex(input: string) {
     .join("");
 }
 
-/**
- * ✅ Template columns (case-insensitive)
- * Person ID, Company Info, Company Name, Given Name, Family Name,
- * Job Title, Department, Country, Email, Email (Second),
- * Telephone Number, Mobile Number, Address-Line1, City, State,
- * Registered Event, Visited Event
- */
 const TEMPLATE_REQUIRED_HEADERS = [
   "person id",
   "company name",
@@ -150,7 +152,6 @@ const TEMPLATE_REQUIRED_HEADERS = [
   "telephone number",
 ];
 
-/** Validate header existence to catch wrong template / broken CSV parsing early */
 function validateTemplateHeaders(firstRowRaw: Row) {
   const rr = normalizeRow(firstRowRaw);
   const missing: string[] = [];
@@ -160,9 +161,6 @@ function validateTemplateHeaders(firstRowRaw: Row) {
   return missing;
 }
 
-/**
- * source_row_key: stable-ish fallback for tracing rows (not used for dedupe policy now)
- */
 async function buildSourceRowKey(rr: Row) {
   const external_person_id = safeRaw(pick(rr, ["person id", "personid", "external_person_id"]));
   const email = safeLower(pick(rr, ["email"]));
@@ -294,11 +292,6 @@ function summarizeRow(x: ContactInsert) {
   };
 }
 
-/**
- * Dedupe ONLY when all 3 identities exist:
- * external_person_id + normalized_email + normalized_phone
- * last-row-wins
- */
 function tripleKeyOf(x: ContactInsert): string | null {
   const pid = (x.external_person_id ?? "").trim();
   const em = (x.normalized_email ?? "").trim();
@@ -334,7 +327,6 @@ function auditDedupeTriple(uploadId: string, rows: ContactInsert[]) {
     keep.set(k, r);
   }
 
-  // remove dropped ones from rows (only for triple-dup)
   const droppedRowNos = new Set<number>();
   for (const it of issues) {
     if (typeof it.row_no === "number") droppedRowNos.add(it.row_no);
@@ -346,7 +338,6 @@ function auditDedupeTriple(uploadId: string, rows: ContactInsert[]) {
 }
 
 async function persistIssues(uploadId: string, issues: ImportIssueRow[]) {
-  // Always rewrite for upload_id (best effort)
   try {
     await supabase.from("contact_import_issues").delete().eq("upload_id", uploadId);
   } catch {}
@@ -360,7 +351,6 @@ async function persistIssues(uploadId: string, issues: ImportIssueRow[]) {
   }
 }
 
-/** Heuristic guard: prevent saving company_name into given_name when person name is missing */
 function fixNameAnomaly(company: string | null, given: string | null, family: string | null) {
   const c = (company ?? "").trim().toLowerCase();
   const g = (given ?? "").trim().toLowerCase();
@@ -369,22 +359,95 @@ function fixNameAnomaly(company: string | null, given: string | null, family: st
   if (!c) return { given, family };
   if (!g) return { given, family };
 
-  // If given == company and family empty -> very likely shifted CSV / wrong mapping -> null it
   if (g === c && !f) {
     return { given: null, family: family ?? null };
   }
   return { given, family };
 }
 
+function SummaryChip(props: {
+  label: string;
+  value: number | string;
+}) {
+  return (
+    <div className="rounded-xl border px-3 py-2">
+      <div className="text-[11px] opacity-60">{props.label}</div>
+      <div className="mt-1 text-sm font-semibold tabular-nums">{props.value}</div>
+    </div>
+  );
+}
+
 export default function AdminUploadsPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const statusFilter = (searchParams.get("status") ?? "").trim().toUpperCase();
+  const activityFilter = (searchParams.get("activity") ?? "").trim().toLowerCase();
+  const issuesFilter = (searchParams.get("issues") ?? "").trim().toLowerCase();
 
   const [uploads, setUploads] = useState<Upload[]>([]);
+  const [uploadsNoActivityToday, setUploadsNoActivityToday] = useState<Set<string>>(new Set());
+  const [uploadsWithRecentIssues, setUploadsWithRecentIssues] = useState<Set<string>>(new Set());
+  const [issueCountByUpload, setIssueCountByUpload] = useState<Record<string, number>>({});
+  const [activeTodayUploads, setActiveTodayUploads] = useState<Set<string>>(new Set());
+
   const [campaignName, setCampaignName] = useState("");
   const [description, setDescription] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [log, setLog] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  const [sortBy, setSortBy] = useState<SortKey>("created_desc");
+
+  const loadUploadFilterMeta = async () => {
+    try {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const { data: activityData, error: activityErr } = await supabase
+        .from("v_call_logs_report")
+        .select("upload_id")
+        .gte("called_at", today.toISOString());
+
+      if (activityErr) throw activityErr;
+
+      const activeTodaySet = new Set<string>(
+        (((activityData as any[]) ?? []) as any[])
+          .map((x) => String(x.upload_id ?? ""))
+          .filter(Boolean)
+      );
+
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+      const { data: issuesData, error: issuesErr } = await supabase
+        .from("contact_import_issues")
+        .select("upload_id")
+        .gte("created_at", sevenDaysAgo.toISOString());
+
+      if (issuesErr) throw issuesErr;
+
+      const counts: Record<string, number> = {};
+      for (const row of ((issuesData as any[]) ?? []) as any[]) {
+        const uploadId = String(row.upload_id ?? "");
+        if (!uploadId) continue;
+        counts[uploadId] = (counts[uploadId] ?? 0) + 1;
+      }
+
+      const recentIssueSet = new Set<string>(Object.keys(counts));
+
+      setActiveTodayUploads(activeTodaySet);
+      setIssueCountByUpload(counts);
+      setUploadsWithRecentIssues(recentIssueSet);
+
+      return activeTodaySet;
+    } catch (e) {
+      console.error("loadUploadFilterMeta failed", e);
+      setActiveTodayUploads(new Set());
+      setIssueCountByUpload({});
+      setUploadsWithRecentIssues(new Set());
+      return new Set<string>();
+    }
+  };
 
   const load = async () => {
     const { data, error } = await supabase
@@ -404,6 +467,16 @@ export default function AdminUploadsPage() {
     }));
 
     setUploads(normalized);
+
+    const activeTodaySet = await loadUploadFilterMeta();
+
+    const noActivityTodaySet = new Set<string>(
+      normalized
+        .filter((u) => u.status === "RUNNING" && !activeTodaySet.has(u.id))
+        .map((u) => u.id)
+    );
+
+    setUploadsNoActivityToday(noActivityTodaySet);
   };
 
   useEffect(() => {
@@ -424,13 +497,12 @@ export default function AdminUploadsPage() {
       const rows = await parseFile(file);
       if (!rows.length) throw new Error("File has no data rows.");
 
-      // ✅ Validate template headers early (catch wrong delimiter / broken CSV)
       const missing = validateTemplateHeaders(rows[0]);
       if (missing.length) {
         throw new Error(
           `Template headers missing: ${missing.join(", ")}.\n` +
             `Please upload đúng template.\n` +
-            `Nếu CSV có dấu phẩy trong Company Info/Company Name, hãy đảm bảo các ô được quote (\"...\") hoặc dùng XLSX.`
+            `Nếu CSV có dấu phẩy trong Company Info/Company Name, hãy đảm bảo các ô được quote ("...") hoặc dùng XLSX.`
         );
       }
 
@@ -461,7 +533,6 @@ export default function AdminUploadsPage() {
       for (let idx = 0; idx < rows.length; idx++) {
         const rr = normalizeRow(rows[idx]);
 
-        // Template keys (+ safe aliases)
         const external_person_id_raw = asStringOrNull(pick(rr, ["person id", "personid", "external_person_id"]));
         const external_person_id = external_person_id_raw ? external_person_id_raw.trim() : null;
 
@@ -471,7 +542,6 @@ export default function AdminUploadsPage() {
         let given_name = asStringOrNull(pick(rr, ["given name", "given_name"]));
         let family_name = asStringOrNull(pick(rr, ["family name", "family_name"]));
 
-        // ✅ Fix anomaly: company duplicated into given name when person name missing
         ({ given: given_name, family: family_name } = fixNameAnomaly(company_name, given_name, family_name));
 
         const job_title = asStringOrNull(pick(rr, ["job title", "job_title"]));
@@ -558,7 +628,6 @@ export default function AdminUploadsPage() {
         });
       }
 
-      // ✅ DEDUPE ONLY triple (pid+email+phone)
       const aud = auditDedupeTriple(uploadId, mapped);
       const kept = aud.kept;
       const issues = aud.issues;
@@ -595,7 +664,6 @@ export default function AdminUploadsPage() {
 
       setLog((prev) => prev + `\nUpserting contacts...`);
 
-      // ✅ Must match DB unique index
       const ON_CONFLICT = "upload_id,external_person_id,normalized_email,normalized_phone";
 
       await upsertChunked("ALL) Insert rows (triple-dedupe only)", payload, ON_CONFLICT, true);
@@ -621,6 +689,69 @@ export default function AdminUploadsPage() {
       setBusy(false);
     }
   };
+
+  const baseFilteredUploads = useMemo(() => {
+    let rows = [...uploads];
+
+    if (statusFilter) {
+      rows = rows.filter((u) => String(u.status).toUpperCase() === statusFilter);
+    }
+
+    if (activityFilter === "today_none") {
+      rows = rows.filter((u) => uploadsNoActivityToday.has(u.id));
+    }
+
+    if (issuesFilter === "has_recent") {
+      rows = rows.filter((u) => uploadsWithRecentIssues.has(u.id));
+    }
+
+    return rows;
+  }, [uploads, statusFilter, activityFilter, issuesFilter, uploadsNoActivityToday, uploadsWithRecentIssues]);
+
+  const filteredUploads = useMemo(() => {
+    const rows = [...baseFilteredUploads];
+
+    rows.sort((a, b) => {
+      switch (sortBy) {
+        case "created_asc":
+          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        case "created_desc":
+          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+        case "name_asc":
+          return a.campaign_name.localeCompare(b.campaign_name);
+        case "name_desc":
+          return b.campaign_name.localeCompare(a.campaign_name);
+        case "rows_asc":
+          return a.total_rows - b.total_rows;
+        case "rows_desc":
+          return b.total_rows - a.total_rows;
+        case "issues_desc":
+          return (issueCountByUpload[b.id] ?? 0) - (issueCountByUpload[a.id] ?? 0);
+        default:
+          return 0;
+      }
+    });
+
+    return rows;
+  }, [baseFilteredUploads, sortBy, issueCountByUpload]);
+
+  const activeFilterLabels = [
+    statusFilter ? `Status = ${statusFilter}` : null,
+    activityFilter === "today_none" ? "No activity today" : null,
+    issuesFilter === "has_recent" ? "Has recent issues" : null,
+  ].filter(Boolean);
+
+  const summary = useMemo(() => {
+    return {
+      total: filteredUploads.length,
+      running: filteredUploads.filter((u) => u.status === "RUNNING").length,
+      pause: filteredUploads.filter((u) => u.status === "PAUSE").length,
+      completed: filteredUploads.filter((u) => u.status === "COMPLETED").length,
+      done: filteredUploads.filter((u) => u.status === "DONE").length,
+      withIssues: filteredUploads.filter((u) => (issueCountByUpload[u.id] ?? 0) > 0).length,
+      noActivityToday: filteredUploads.filter((u) => uploadsNoActivityToday.has(u.id)).length,
+    };
+  }, [filteredUploads, issueCountByUpload, uploadsNoActivityToday]);
 
   return (
     <div className="space-y-6">
@@ -660,55 +791,127 @@ export default function AdminUploadsPage() {
       </Card>
 
       <div className="space-y-3">
-        <div className="flex items-end justify-between">
+        {activeFilterLabels.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {activeFilterLabels.map((label) => (
+              <div key={label} className="rounded-full border px-3 py-1 text-xs opacity-80">
+                {label}
+              </div>
+            ))}
+
+            <Link href="/admin/uploads">
+              <Button variant="outline" size="sm">
+                Clear filters
+              </Button>
+            </Link>
+          </div>
+        ) : null}
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <SummaryChip label="Visible campaigns" value={summary.total} />
+          <SummaryChip label="Running" value={summary.running} />
+          <SummaryChip label="Paused" value={summary.pause} />
+          <SummaryChip label="Completed / Done" value={summary.completed + summary.done} />
+          <SummaryChip label="With recent issues" value={summary.withIssues} />
+          <SummaryChip label="No activity today" value={summary.noActivityToday} />
+        </div>
+
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
-            <div className="text-lg font-semibold">Recent Uploads</div>
+            <div className="text-lg font-semibold">Campaigns</div>
             <div className="text-sm opacity-70">
-              {uploads.length ? `Showing ${uploads.length} latest campaigns` : "No campaigns yet"}
+              {filteredUploads.length
+                ? `Showing ${filteredUploads.length} campaign(s)`
+                : "No campaigns match the current filter"}
             </div>
+          </div>
+
+          <div className="w-full md:w-[220px]">
+            <div className="text-xs opacity-60 mb-1">Sort by</div>
+            <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortKey)}>
+              <SelectTrigger>
+                <SelectValue placeholder="Sort by" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="created_desc">Newest first</SelectItem>
+                <SelectItem value="created_asc">Oldest first</SelectItem>
+                <SelectItem value="name_asc">Name A → Z</SelectItem>
+                <SelectItem value="name_desc">Name Z → A</SelectItem>
+                <SelectItem value="rows_desc">Rows high → low</SelectItem>
+                <SelectItem value="rows_asc">Rows low → high</SelectItem>
+                <SelectItem value="issues_desc">Issues high → low</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </div>
 
-        {uploads.length === 0 ? (
+        {filteredUploads.length === 0 ? (
           <Card>
             <CardContent className="py-10 text-center text-sm opacity-70">
-              No uploads yet. Import your first campaign above.
+              No campaigns found for the current filter.
             </CardContent>
           </Card>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {uploads.map((u) => (
-              <Link key={u.id} href={`/admin/uploads/${u.id}`} className="group block focus:outline-none">
-                <Card className="h-full transition-all hover:shadow-md hover:-translate-y-[1px] focus-visible:ring-2 focus-visible:ring-ring">
-                  <CardHeader className="pb-2">
-                    <div className="flex items-start justify-between gap-3">
-                      <CardTitle className="text-base leading-5 line-clamp-2">{u.campaign_name}</CardTitle>
-                      <StatusBadge status={u.status} kind="campaign" />
-                    </div>
-                  </CardHeader>
+            {filteredUploads.map((u) => {
+              const issueCount = issueCountByUpload[u.id] ?? 0;
+              const hasIssue = issueCount > 0;
+              const hasActivityToday = activeTodayUploads.has(u.id);
+              const noActivityToday = uploadsNoActivityToday.has(u.id);
 
-                  <CardContent className="pt-0">
-                    {u.description ? <div className="text-xs opacity-70 line-clamp-2 mb-2">{u.description}</div> : null}
+              return (
+                <Link key={u.id} href={`/admin/uploads/${u.id}`} className="group block focus:outline-none">
+                  <Card className="h-full transition-all hover:shadow-md hover:-translate-y-[1px] focus-visible:ring-2 focus-visible:ring-ring">
+                    <CardHeader className="pb-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <CardTitle className="text-base leading-5 line-clamp-2">{u.campaign_name}</CardTitle>
+                        <StatusBadge status={u.status} kind="campaign" />
+                      </div>
+                    </CardHeader>
 
-                    <div className="grid grid-cols-2 gap-3 text-sm">
-                      <div className="space-y-1">
-                        <div className="text-xs opacity-60">Rows</div>
-                        <div className="font-medium tabular-nums">{u.total_rows}</div>
+                    <CardContent className="pt-0">
+                      {u.description ? (
+                        <div className="text-xs opacity-70 line-clamp-2 mb-2">{u.description}</div>
+                      ) : null}
+
+                      <div className="flex flex-wrap gap-2 mb-3">
+                        {hasIssue ? (
+                          <Badge className="bg-amber-500 text-black hover:bg-amber-500">
+                            Issues: {issueCount}
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline">No issues</Badge>
+                        )}
+
+                        {hasActivityToday ? (
+                          <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
+                            Active today
+                          </Badge>
+                        ) : noActivityToday ? (
+                          <Badge variant="outline">No activity today</Badge>
+                        ) : null}
                       </div>
 
-                      <div className="space-y-1">
-                        <div className="text-xs opacity-60">Created</div>
-                        <div className="font-medium">{new Date(u.created_at).toLocaleString()}</div>
-                      </div>
-                    </div>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div className="space-y-1">
+                          <div className="text-xs opacity-60">Rows</div>
+                          <div className="font-medium tabular-nums">{u.total_rows}</div>
+                        </div>
 
-                    <div className="mt-3 flex items-center justify-end text-xs opacity-70">
-                      <span className="transition-transform group-hover:translate-x-0.5">View →</span>
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
-            ))}
+                        <div className="space-y-1">
+                          <div className="text-xs opacity-60">Created</div>
+                          <div className="font-medium">{new Date(u.created_at).toLocaleString()}</div>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 flex items-center justify-end text-xs opacity-70">
+                        <span className="transition-transform group-hover:translate-x-0.5">View →</span>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </Link>
+              );
+            })}
           </div>
         )}
       </div>
