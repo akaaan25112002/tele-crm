@@ -10,6 +10,7 @@ export default function TeleLayout({ children }: { children: React.ReactNode }) 
           title="Tele"
           nav={[
             { href: "/tele", label: "Campaigns" },
+            { href: "/tele/dashboard", label: "Dashboard" },
             { href: "/tele/workspace", label: "Workspace" },
           ]}
         >

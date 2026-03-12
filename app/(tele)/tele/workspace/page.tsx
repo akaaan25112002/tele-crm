@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { StatusBadge } from "@/components/status-badge";
 import { buildNormalizedPhone } from "@/lib/crm/phone";
 import { AddContactDialog } from "@/components/AddContactDialog";
+import TeleWorkspaceCompactSummary from "./TeleWorkspaceCompactSummary";
 
 const AUTO_REFRESH_MS = 60_000;
 const AUTO_REFRESH_COOLDOWN_MS = 20_000;
@@ -268,6 +269,7 @@ export default function TeleWorkspacePage() {
   const [topMsg, setTopMsg] = useState<string | null>(null);
   const [topMsgKind, setTopMsgKind] = useState<TopMsgKind>("info");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+  const [dashboardRefreshToken, setDashboardRefreshToken] = useState(0);
 
   const [draftById, setDraftById] = useState<Record<string, Draft>>({});
   const [resultMap, setResultMap] = useState<Record<string, { group: string; detail: string; final_status?: FinalStatus }>>(
@@ -588,6 +590,7 @@ export default function TeleWorkspacePage() {
 
       await loadQueue(opts?.uid);
       setLastUpdatedAt(new Date().toISOString());
+      setDashboardRefreshToken((x) => x + 1);
     },
     [loadQueue, reconcileExpiredLeasesForCampaigns, setBanner]
   );
@@ -837,6 +840,7 @@ export default function TeleWorkspacePage() {
       setNoteText("");
       await loadQueue();
       setLastUpdatedAt(new Date().toISOString());
+      setDashboardRefreshToken((x) => x + 1);
       setBanner("Call submitted successfully.", "success");
     } catch (e: any) {
       const m = e?.message ?? "Submit failed";
@@ -847,6 +851,7 @@ export default function TeleWorkspacePage() {
       if (low.includes("lease") || low.includes("owner") || low.includes("not owner")) {
         await loadQueue();
         setLastUpdatedAt(new Date().toISOString());
+        setDashboardRefreshToken((x) => x + 1);
       }
     } finally {
       setBusy(false);
@@ -872,6 +877,7 @@ export default function TeleWorkspacePage() {
 
       await Promise.all([loadQueue(), loadRecentEdits(active.id)]);
       setLastUpdatedAt(new Date().toISOString());
+      setDashboardRefreshToken((x) => x + 1);
       setBanner(`Updated ${editField} successfully.`, "success");
     } catch (e: any) {
       const m = e?.message ?? "Edit failed";
@@ -932,6 +938,7 @@ export default function TeleWorkspacePage() {
       await loadQueue();
       setActiveId(newId);
       setLastUpdatedAt(new Date().toISOString());
+      setDashboardRefreshToken((x) => x + 1);
       setBanner("Contact created and assigned to your queue.", "success");
     } catch (e: any) {
       const m = e?.message ?? "Add contact failed";
@@ -973,6 +980,8 @@ export default function TeleWorkspacePage() {
         )}
 
         {roleWarn && <div className="text-sm text-red-600 whitespace-pre-wrap">{roleWarn}</div>}
+
+        <TeleWorkspaceCompactSummary refreshToken={dashboardRefreshToken} />
 
         <div className="flex items-center justify-between text-xs opacity-60">
           <div>Last updated: {lastUpdatedAt ? fmtDT(lastUpdatedAt) : "—"}</div>
