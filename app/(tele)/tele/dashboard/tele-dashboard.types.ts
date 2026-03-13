@@ -52,11 +52,18 @@ export type TeleDashboardQueue = {
   overdue_callbacks: number;
 };
 
-export type TeleDashboardRecentRow = {
+export type TeleShiftActivityRow = {
   call_log_id: string;
   called_at: string;
+
   company_name: string | null;
   person_id: string | null;
+  customer_name: string | null;
+
+  phone: string | null;
+  telephone_number: string | null;
+  mobile_number: string | null;
+
   final_status: string | null;
   group_name: string | null;
   detail_name: string | null;
@@ -130,7 +137,10 @@ export type TeleDashboardData = {
 
   summary: TeleDashboardSummary;
   queue: TeleDashboardQueue;
-  recent: TeleDashboardRecentRow[];
+
+  shift_activity: TeleShiftActivityRow[];
+  shift_activity_label: string;
+
   attention: TeleDashboardAttentionItem[];
   health: TeleDashboardHealth;
 

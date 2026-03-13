@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -21,6 +22,7 @@ import {
 import type {
   CampaignOption,
   TeleDashboardData,
+  TeleShiftActivityRow,
 } from "./tele-dashboard.types";
 import {
   clamp,
@@ -30,6 +32,8 @@ import {
 } from "./tele-dashboard.utils";
 
 const AUTO_REFRESH_MS = 60_000;
+
+type ActivityFilter = "ALL" | "DONE" | "INVALID" | "CALLBACK";
 
 function MiniStat(props: { label: string; value: number | string }) {
   return (
@@ -78,7 +82,7 @@ function finalStatusBadge(fs?: string | null) {
 function ProgressBar(props: { value: number }) {
   const v = clamp(Number(props.value ?? 0), 0, 100);
   return (
-    <div className="mt-2 h-2 rounded-full bg-muted overflow-hidden">
+    <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
       <div className="h-full rounded-full bg-foreground/70" style={{ width: `${v}%` }} />
     </div>
   );
@@ -87,10 +91,20 @@ function ProgressBar(props: { value: number }) {
 function TrendBar(props: { value: number; max: number }) {
   const width = props.max > 0 ? (props.value / props.max) * 100 : 0;
   return (
-    <div className="h-2 rounded-full bg-muted overflow-hidden">
+    <div className="h-2 overflow-hidden rounded-full bg-muted">
       <div className="h-full rounded-full bg-foreground/70" style={{ width: `${width}%` }} />
     </div>
   );
+}
+
+function buildActivityPhones(row: TeleShiftActivityRow) {
+  const parts = [row.telephone_number, row.mobile_number].filter(
+    (x): x is string => Boolean(x && x.trim())
+  );
+
+  if (parts.length === 0) return "—";
+
+  return parts.join(" | ");
 }
 
 const EMPTY_DATA: TeleDashboardData = {
@@ -117,7 +131,8 @@ const EMPTY_DATA: TeleDashboardData = {
     stale_holding: 0,
     overdue_callbacks: 0,
   },
-  recent: [],
+  shift_activity: [],
+  shift_activity_label: "All Contacts Processed Today",
   attention: [],
   health: {
     productivity_state: "low",
@@ -161,6 +176,40 @@ const EMPTY_DATA: TeleDashboardData = {
   weekly_trend: [],
 };
 
+function filterShiftActivity(
+  rows: TeleShiftActivityRow[],
+  statusFilter: ActivityFilter,
+  keyword: string
+) {
+  const q = keyword.trim().toLowerCase();
+
+  return rows.filter((row) => {
+    const status = String(row.final_status ?? "").trim().toUpperCase();
+
+    if (statusFilter !== "ALL" && status !== statusFilter) {
+      return false;
+    }
+
+    if (!q) return true;
+
+    const haystack = [
+      row.customer_name ?? "",
+      row.company_name ?? "",
+      row.person_id ?? "",
+      row.telephone_number ?? "",
+      row.mobile_number ?? "",
+      row.group_name ?? "",
+      row.detail_name ?? "",
+      row.note_text ?? "",
+      row.final_status ?? "",
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    return haystack.includes(q);
+  });
+}
+
 export default function TeleDashboardPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -170,6 +219,9 @@ export default function TeleDashboardPage() {
   const [uid, setUid] = useState<string | null>(null);
   const [campaignOptions, setCampaignOptions] = useState<CampaignOption[]>([]);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>("");
+
+  const [activityFilter, setActivityFilter] = useState<ActivityFilter>("ALL");
+  const [activityKeyword, setActivityKeyword] = useState("");
 
   const [data, setData] = useState<TeleDashboardData>(EMPTY_DATA);
 
@@ -238,11 +290,30 @@ export default function TeleDashboardPage() {
 
   const tone = useMemo(() => healthToneClass(data.health), [data.health]);
 
+  const filteredShiftActivity = useMemo(() => {
+    return filterShiftActivity(data.shift_activity, activityFilter, activityKeyword);
+  }, [data.shift_activity, activityFilter, activityKeyword]);
+
+  const activityCountSummary = useMemo(() => {
+    const all = data.shift_activity.length;
+    const done = data.shift_activity.filter(
+      (x) => String(x.final_status ?? "").toUpperCase() === "DONE"
+    ).length;
+    const invalid = data.shift_activity.filter(
+      (x) => String(x.final_status ?? "").toUpperCase() === "INVALID"
+    ).length;
+    const callback = data.shift_activity.filter(
+      (x) => String(x.final_status ?? "").toUpperCase() === "CALLBACK"
+    ).length;
+
+    return { all, done, invalid, callback };
+  }, [data.shift_activity]);
+
   if (loading) {
     return (
       <Card>
         <CardContent className="py-6">
-          <div className="h-6 rounded bg-muted animate-pulse" />
+          <div className="h-6 animate-pulse rounded bg-muted" />
         </CardContent>
       </Card>
     );
@@ -488,7 +559,7 @@ export default function TeleDashboardPage() {
           {data.attention.length === 0 ? (
             <div className="text-sm opacity-70">No immediate action needed.</div>
           ) : (
-            <div className="space-y-3">
+            <div className="max-h-[360px] space-y-3 overflow-y-auto pr-1">
               {data.attention.map((item, idx) => (
                 <div
                   key={idx}
@@ -514,7 +585,7 @@ export default function TeleDashboardPage() {
           {data.weekly_trend.length === 0 ? (
             <div className="text-sm opacity-70">No weekly trend data found.</div>
           ) : (
-            <div className="space-y-3">
+            <div className="max-h-[420px] space-y-3 overflow-y-auto pr-1">
               {data.weekly_trend.map((row) => (
                 <div key={row.date_label} className="rounded-xl border p-3">
                   <div className="mb-2 flex items-center justify-between text-sm">
@@ -547,18 +618,65 @@ export default function TeleDashboardPage() {
         </SectionCard>
       </div>
 
-      <SectionCard title="Recent Activity">
-        {data.recent.length === 0 ? (
-          <div className="text-sm opacity-70">No recent call activity found.</div>
+      <SectionCard
+        title={data.shift_activity_label}
+        action={
+          <div className="flex flex-col gap-2 md:flex-row md:items-center">
+            <div className="w-[150px]">
+              <Select
+                value={activityFilter}
+                onValueChange={(v) => setActivityFilter(v as ActivityFilter)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Filter status" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ALL">All</SelectItem>
+                  <SelectItem value="DONE">DONE</SelectItem>
+                  <SelectItem value="INVALID">INVALID</SelectItem>
+                  <SelectItem value="CALLBACK">CALLBACK</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="w-[240px]">
+              <Input
+                placeholder="Search name / company / phone / note..."
+                value={activityKeyword}
+                onChange={(e) => setActivityKeyword(e.target.value)}
+              />
+            </div>
+          </div>
+        }
+      >
+        <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-5">
+          <MiniStat label="All" value={activityCountSummary.all} />
+          <MiniStat label="DONE" value={activityCountSummary.done} />
+          <MiniStat label="INVALID" value={activityCountSummary.invalid} />
+          <MiniStat label="CALLBACK" value={activityCountSummary.callback} />
+          <MiniStat label="Filtered" value={filteredShiftActivity.length} />
+        </div>
+
+        {filteredShiftActivity.length === 0 ? (
+          <div className="text-sm opacity-70">No processed contacts found for this filter.</div>
         ) : (
-          <div className="space-y-3">
-            {data.recent.map((item) => (
+          <div className="max-h-[620px] space-y-3 overflow-y-auto pr-1">
+            {filteredShiftActivity.map((item) => (
               <div key={item.call_log_id} className="rounded-xl border p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-sm font-medium">
-                      {item.company_name || item.person_id || "Recent call"}
+                    <div className="text-sm font-semibold">
+                      {item.customer_name ?? "Unknown"}
                     </div>
+
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      Tel/Mobile: {buildActivityPhones(item)}
+                    </div>
+
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {item.company_name ?? "—"}
+                    </div>
+
                     <div className="mt-1 text-xs opacity-70">{fmtDT(item.called_at)}</div>
                   </div>
 
@@ -570,7 +688,7 @@ export default function TeleDashboardPage() {
                   {item.detail_name ? ` · ${item.detail_name}` : ""}
                 </div>
 
-                <div className="mt-2 text-xs opacity-60 line-clamp-2">
+                <div className="mt-2 text-xs opacity-60 whitespace-pre-wrap">
                   {item.note_text || "No note"}
                 </div>
               </div>

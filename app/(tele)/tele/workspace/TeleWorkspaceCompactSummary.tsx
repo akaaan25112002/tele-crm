@@ -42,7 +42,8 @@ const EMPTY_DATA: TeleDashboardData = {
     stale_holding: 0,
     overdue_callbacks: 0,
   },
-  recent: [],
+  shift_activity: [],
+  shift_activity_label: "All Contacts Processed Today",
   attention: [],
   health: {
     productivity_state: "low",

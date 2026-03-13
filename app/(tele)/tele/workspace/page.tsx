@@ -81,6 +81,13 @@ type Contact = {
   mobile_country_code_effective?: string | null;
   mobile_number_effective?: string | null;
 
+  job_title_effective?: string | null;
+  department_effective?: string | null;
+
+  company_info_effective?: string | null;
+  registered_event_effective?: string | null;
+  visited_event_effective?: string | null;
+
   address_line1_effective?: string | null;
   address_line2_effective?: string | null;
   address_line3_effective?: string | null;
@@ -241,6 +248,25 @@ function emptyAddForm(): AddFormState {
     registered_event: "",
     visited_event: "",
   };
+}
+
+function InfoRow(props: {
+  label: string;
+  value: React.ReactNode;
+  action?: React.ReactNode;
+  multiline?: boolean;
+}) {
+  return (
+    <div>
+      <div className="text-xs opacity-70">{props.label}</div>
+      <div className={`mt-1 flex items-start justify-between gap-2 ${props.multiline ? "" : "min-h-[24px]"}`}>
+        <div className={`font-semibold text-sm ${props.multiline ? "whitespace-pre-wrap" : ""}`}>
+          {props.value}
+        </div>
+        {props.action ? <div className="shrink-0">{props.action}</div> : null}
+      </div>
+    </div>
+  );
 }
 
 type TopMsgKind = "success" | "error" | "info";
@@ -457,6 +483,9 @@ export default function TeleWorkspacePage() {
           [
             "id",
             "external_person_id",
+            "company_info",
+            "registered_event",
+            "visited_event",
             "company_name",
             "given_name",
             "family_name",
@@ -489,6 +518,11 @@ export default function TeleWorkspacePage() {
             "telephone_number_effective",
             "mobile_country_code_effective",
             "mobile_number_effective",
+            "job_title_effective",
+            "department_effective",
+            "company_info_effective",
+            "registered_event_effective",
+            "visited_event_effective",
             "address_line1_effective",
             "address_line2_effective",
             "address_line3_effective",
@@ -957,6 +991,98 @@ export default function TeleWorkspacePage() {
     return name || (active.company_name_effective ?? active.company_name) || "—";
   }, [active]);
 
+  const displayJobTitle = useMemo(() => {
+  if (!active) return "—";
+  return active.job_title_effective ?? active.job_title ?? "—";
+}, [active]);
+
+const displayDepartment = useMemo(() => {
+  if (!active) return "—";
+  return active.department_effective ?? active.department ?? "—";
+}, [active]);
+
+const displayCompanyInfo = useMemo(() => {
+  if (!active) return "—";
+  return active.company_info_effective ?? active.company_info ?? "—";
+}, [active]);
+
+const displayRegisteredEvent = useMemo(() => {
+  if (!active) return "—";
+  return active.registered_event_effective ?? active.registered_event ?? "—";
+}, [active]);
+
+const displayVisitedEvent = useMemo(() => {
+  if (!active) return "—";
+  return active.visited_event_effective ?? active.visited_event ?? "—";
+}, [active]);
+
+const displayTelephone = useMemo(() => {
+  if (!active) return "";
+  return active.telephone_number_effective ?? active.telephone_number ?? "";
+}, [active]);
+
+const displayMobile = useMemo(() => {
+  if (!active) return "";
+  return `${active.mobile_country_code_effective ?? active.mobile_country_code ?? ""}${
+    active.mobile_number_effective ?? active.mobile_number ?? ""
+  }`.trim();
+}, [active]);
+
+const displayEmail = useMemo(() => {
+  if (!active) return "";
+  return active.email_effective ?? active.email ?? "";
+}, [active]);
+
+const displayEmailSecond = useMemo(() => {
+  if (!active) return "";
+  return active.email_second_effective ?? active.email_second ?? "";
+}, [active]);
+
+const displayAddress = useMemo(() => {
+  if (!active) return "—";
+
+  const line1 = active.address_line1_effective ?? active.address_line1 ?? "";
+  const line2 = active.address_line2_effective ?? active.address_line2 ?? "";
+  const line3 = active.address_line3_effective ?? active.address_line3 ?? "";
+
+  const full = [line1, line2, line3].filter(Boolean).join(", ").trim();
+  return full || "—";
+}, [active]);
+
+const displayCityWard = useMemo(() => {
+  if (!active) return "—";
+  return active.city_ward_effective ?? active.city_ward ?? "—";
+}, [active]);
+
+const displayState = useMemo(() => {
+  if (!active) return "—";
+  return active.state_effective ?? active.state ?? "—";
+}, [active]);
+
+const displayCountry = useMemo(() => {
+  if (!active) return "—";
+  return active.country_effective ?? active.country ?? "—";
+}, [active]);
+
+const copyText = useCallback(
+  async (value: string, label: string) => {
+    const text = value.trim();
+    if (!text) {
+      setBanner(`${label} is empty.`, "error");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setBanner(`${label} copied.`, "success");
+    } catch (e: any) {
+      console.error(e);
+      setBanner(`Failed to copy ${label.toLowerCase()}.`, "error");
+    }
+  },
+  [setBanner]
+);
+
   const selectedNote2 = useMemo(() => note2Options.find((x) => x.id === note2) ?? null, [note2Options, note2]);
   const selectedFinalStatus = (selectedNote2?.final_status ?? null) as FinalStatus | null;
 
@@ -1081,35 +1207,121 @@ export default function TeleWorkspacePage() {
               ) : (
                 <>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div className="p-3 rounded-lg border">
-                      <div className="text-xs opacity-70 mt-2">Person ID</div>
-                      <div className="font-semibold text-sm">{active.external_person_id ?? "—"}</div>
+                    <div className="rounded-lg border p-3 space-y-4">
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-wide opacity-60">
+                          Identity
+                        </div>
 
-                      <div className="text-xs opacity-70 mt-2">Company name</div>
-                      <div className="font-semibold">{active.company_name_effective ?? active.company_name ?? "—"}</div>
-
-                      <div className="text-xs opacity-70 mt-2">Customer Name</div>
-                      <div className="font-semibold">{displayName}</div>
-
-                      <div className="text-xs opacity-70 mt-2">Telephone number</div>
-                      <div className="font-semibold">{active.telephone_number_effective ?? active.telephone_number ?? "—"}</div>
-
-                      <div className="text-xs opacity-70 mt-2">Mobile number</div>
-                      <div className="font-semibold">
-                        {(active.mobile_country_code_effective ?? active.mobile_country_code ?? "")}
-                        {(active.mobile_number_effective ?? active.mobile_number ?? "") || "—"}
+                        <div className="mt-2 grid grid-cols-1 gap-3">
+                          <InfoRow label="Person ID" value={active.external_person_id ?? "—"} />
+                          <InfoRow label="Customer Name" value={displayName} />
+                          <InfoRow label="Job Title" value={displayJobTitle} />
+                        </div>
                       </div>
 
-                      <div className="text-xs opacity-70 mt-2">Email</div>
-                      <div className="font-semibold text-sm">{active.email_effective ?? active.email ?? "—"}</div>
+                      <div className="border-t pt-3">
+                        <div className="text-xs font-semibold uppercase tracking-wide opacity-60">
+                          Company
+                        </div>
 
-                      <div className="text-xs opacity-70 mt-2">Email (Second)</div>
-                      <div className="font-semibold text-sm">
-                        {active.email_second_effective ?? active.email_second ?? "—"}
+                        <div className="mt-2 grid grid-cols-1 gap-3">
+                          <InfoRow
+                            label="Company Name"
+                            value={active.company_name_effective ?? active.company_name ?? "—"}
+                          />
+                        </div>
                       </div>
 
-                      <div className="text-xs opacity-70 mt-2">Address</div>
-                      <div className="font-semibold text-sm">{active.address_line1_effective ?? active.address_line1 ?? "—"}</div>
+                      <div className="border-t pt-3">
+                        <div className="text-xs font-semibold uppercase tracking-wide opacity-60">
+                          Contact
+                        </div>
+
+                        <div className="mt-2 grid grid-cols-1 gap-3">
+                          <InfoRow
+                            label="Telephone Number"
+                            value={displayTelephone || "—"}
+                            action={
+                              <div className="flex gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void copyText(displayTelephone, "Telephone number")}
+                                  disabled={!displayTelephone}
+                                >
+                                  Copy
+                                </Button>
+                              </div>
+                            }
+                          />
+
+                          <InfoRow
+                            label="Mobile Number"
+                            value={displayMobile || "—"}
+                            action={
+                              <div className="flex gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void copyText(displayMobile, "Mobile number")}
+                                  disabled={!displayMobile}
+                                >
+                                  Copy
+                                </Button>
+                              </div>
+                            }
+                          />
+
+                          <InfoRow
+                            label="Email"
+                            value={displayEmail || "—"}
+                            action={
+                              <div className="flex gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void copyText(displayEmail, "Email")}
+                                  disabled={!displayEmail}
+                                >
+                                  Copy
+                                </Button>
+                              </div>
+                            }
+                          />
+
+                          <InfoRow
+                            label="Email (Second)"
+                            value={displayEmailSecond || "—"}
+                            action={
+                              <div className="flex gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void copyText(displayEmailSecond, "Second email")}
+                                  disabled={!displayEmailSecond}
+                                >
+                                  Copy
+                                </Button>
+                              </div>
+                            }
+                          />
+                        </div>
+                      </div>
+
+                      <div className="border-t pt-3">
+                        <div className="text-xs font-semibold uppercase tracking-wide opacity-60">
+                          Location
+                        </div>
+
+                        <div className="mt-2 grid grid-cols-1 gap-3">
+                          <InfoRow label="Address" value={displayAddress} multiline />
+                        </div>
+                      </div>
                     </div>
 
                     <div className="p-3 rounded-lg border space-y-2">

@@ -4,7 +4,7 @@ import type {
   CampaignOption,
   CampaignProgressTele,
   TeleDashboardData,
-  TeleDashboardRecentRow,
+  TeleShiftActivityRow,
   TeleWeeklyTrendRow,
 } from "./tele-dashboard.types";
 import {
@@ -50,12 +50,70 @@ function buildShiftBoundaries() {
   const shift2Start = new Date(`${yyyy}-${mm}-${dd}T13:00:00`);
   const shift2End = new Date(`${yyyy}-${mm}-${dd}T18:00:00`);
 
+  const dayStart = new Date(`${yyyy}-${mm}-${dd}T00:00:00`);
+  const dayEnd = new Date(`${yyyy}-${mm}-${dd}T23:59:59`);
+
   return {
     shift1StartIso: shift1Start.toISOString(),
     shift1EndIso: shift1End.toISOString(),
     shift2StartIso: shift2Start.toISOString(),
     shift2EndIso: shift2End.toISOString(),
+    dayStartIso: dayStart.toISOString(),
+    dayEndIso: dayEnd.toISOString(),
   };
+}
+
+function asTrimmedString(value: unknown): string | null {
+  if (value == null) return null;
+  const s = String(value).trim();
+  return s || null;
+}
+
+function normalizeStatus(value: unknown): string {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function isDoneStatus(status: unknown): boolean {
+  return normalizeStatus(status) === "DONE";
+}
+
+function isCallbackStatus(status: unknown): boolean {
+  return normalizeStatus(status) === "CALLBACK";
+}
+
+function isInvalidStatus(status: unknown): boolean {
+  return normalizeStatus(status) === "INVALID";
+}
+
+function isTerminalStatus(status: unknown): boolean {
+  const fs = normalizeStatus(status);
+  return fs === "DONE" || fs === "INVALID";
+}
+
+function isExpiredIso(iso: unknown): boolean {
+  if (!iso) return false;
+  const ms = new Date(String(iso)).getTime();
+  if (Number.isNaN(ms)) return false;
+  return ms <= Date.now();
+}
+
+function countByStatus(rows: any[], predicate: (status: unknown) => boolean): number {
+  return rows.filter((r) => predicate(r.final_status)).length;
+}
+
+function buildCustomerName(row: any): string | null {
+  const given = asTrimmedString(row["Given Name"]);
+  const family = asTrimmedString(row["Family Name"]);
+
+  const full = [given, family]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (full) return full;
+
+  return asTrimmedString(row["Company Name"]);
 }
 
 export async function getCurrentTeleUserId() {
@@ -125,7 +183,7 @@ export async function inferActiveCampaignId(uid: string): Promise<string | null>
       const uploadId = String(row.upload_id ?? "");
       if (!uploadId) continue;
 
-      const status = String(row.current_status ?? "").toUpperCase();
+      const status = normalizeStatus(row.current_status);
       const leaseMs = row.lease_expires_at
         ? new Date(String(row.lease_expires_at)).getTime()
         : 0;
@@ -240,7 +298,30 @@ export async function loadTeleDashboardData(
     shift1EndIso,
     shift2StartIso,
     shift2EndIso,
+    dayStartIso,
+    dayEndIso,
   } = buildShiftBoundaries();
+
+  const shiftActivityStartIso =
+    shift.current_shift === "SHIFT_1"
+      ? shift1StartIso
+      : shift.current_shift === "SHIFT_2"
+      ? shift2StartIso
+      : dayStartIso;
+
+  const shiftActivityEndIso =
+    shift.current_shift === "SHIFT_1"
+      ? shift1EndIso
+      : shift.current_shift === "SHIFT_2"
+      ? shift2EndIso
+      : dayEndIso;
+
+  const shiftActivityLabel =
+    shift.current_shift === "SHIFT_1"
+      ? "All Contacts Processed in Shift 1"
+      : shift.current_shift === "SHIFT_2"
+      ? "All Contacts Processed in Shift 2"
+      : "All Contacts Processed Today";
 
   const [
     campaignInfo,
@@ -250,7 +331,7 @@ export async function loadTeleDashboardData(
     personalCallsAllRes,
     holdingsRes,
     overdueRes,
-    recentRes,
+    shiftActivityRes,
     weeklyRes,
     shift1Res,
     shift2Res,
@@ -272,7 +353,8 @@ export async function loadTeleDashboardData(
       .from("v_call_logs_report")
       .select("call_log_id, tele_id, final_status, called_at")
       .eq("upload_id", uploadId)
-      .eq("tele_id", uid),
+      .eq("tele_id", uid)
+      .order("called_at", { ascending: false }),
 
     supabase
       .from("v_contacts_master_enriched")
@@ -301,12 +383,17 @@ export async function loadTeleDashboardData(
           "note_text",
           `"Person ID"`,
           `"Company Name"`,
+          `"Given Name"`,
+          `"Family Name"`,
+          `"Telephone Number"`,
+          `"Mobile Number"`,
         ].join(",")
       )
       .eq("upload_id", uploadId)
       .eq("tele_id", uid)
-      .order("called_at", { ascending: false })
-      .limit(8),
+      .gte("called_at", shiftActivityStartIso)
+      .lte("called_at", shiftActivityEndIso)
+      .order("called_at", { ascending: false }),
 
     supabase
       .from("v_call_logs_report")
@@ -338,7 +425,7 @@ export async function loadTeleDashboardData(
   if (personalCallsAllRes.error) throw personalCallsAllRes.error;
   if (holdingsRes.error) throw holdingsRes.error;
   if (overdueRes.error) throw overdueRes.error;
-  if (recentRes.error) throw recentRes.error;
+  if (shiftActivityRes.error) throw shiftActivityRes.error;
   if (weeklyRes.error) throw weeklyRes.error;
   if (shift1Res.error) throw shift1Res.error;
   if (shift2Res.error) throw shift2Res.error;
@@ -355,48 +442,23 @@ export async function loadTeleDashboardData(
   const callsAllRows = ((personalCallsAllRes.data as any[]) ?? []) as any[];
   const holdingsRows = ((holdingsRes.data as any[]) ?? []) as any[];
   const overdueRows = ((overdueRes.data as any[]) ?? []) as any[];
-  const recentRowsRaw = ((recentRes.data as any[]) ?? []) as any[];
+  const shiftActivityRowsRaw = ((shiftActivityRes.data as any[]) ?? []) as any[];
   const weeklyRowsRaw = ((weeklyRes.data as any[]) ?? []) as any[];
   const shift1Rows = ((shift1Res.data as any[]) ?? []) as any[];
   const shift2Rows = ((shift2Res.data as any[]) ?? []) as any[];
 
-  const done_today = callsTodayRows.filter(
-    (r) => String(r.final_status ?? "").toUpperCase() === "DONE"
-  ).length;
-  const callback_today = callsTodayRows.filter(
-    (r) => String(r.final_status ?? "").toUpperCase() === "CALLBACK"
-  ).length;
-  const invalid_today = callsTodayRows.filter(
-    (r) => String(r.final_status ?? "").toUpperCase() === "INVALID"
-  ).length;
-  const terminal_today = callsTodayRows.filter((r) => {
-    const fs = String(r.final_status ?? "").toUpperCase();
-    return fs === "DONE" || fs === "INVALID";
-  }).length;
+  const done_today = countByStatus(callsTodayRows, isDoneStatus);
+  const callback_today = countByStatus(callsTodayRows, isCallbackStatus);
+  const invalid_today = countByStatus(callsTodayRows, isInvalidStatus);
+  const terminal_today = countByStatus(callsTodayRows, isTerminalStatus);
 
-  const done_total = callsAllRows.filter(
-    (r) => String(r.final_status ?? "").toUpperCase() === "DONE"
-  ).length;
-  const callback_total = callsAllRows.filter(
-    (r) => String(r.final_status ?? "").toUpperCase() === "CALLBACK"
-  ).length;
-  const invalid_total = callsAllRows.filter(
-    (r) => String(r.final_status ?? "").toUpperCase() === "INVALID"
-  ).length;
-  const terminal_total = callsAllRows.filter((r) => {
-    const fs = String(r.final_status ?? "").toUpperCase();
-    return fs === "DONE" || fs === "INVALID";
-  }).length;
+  const done_total = countByStatus(callsAllRows, isDoneStatus);
+  const callback_total = countByStatus(callsAllRows, isCallbackStatus);
+  const invalid_total = countByStatus(callsAllRows, isInvalidStatus);
+  const terminal_total = countByStatus(callsAllRows, isTerminalStatus);
 
-  const shift_1_processed = shift1Rows.filter((r) => {
-    const fs = String(r.final_status ?? "").toUpperCase();
-    return fs === "DONE" || fs === "INVALID";
-  }).length;
-
-  const shift_2_processed = shift2Rows.filter((r) => {
-    const fs = String(r.final_status ?? "").toUpperCase();
-    return fs === "DONE" || fs === "INVALID";
-  }).length;
+  const shift_1_processed = countByStatus(shift1Rows, isTerminalStatus);
+  const shift_2_processed = countByStatus(shift2Rows, isTerminalStatus);
 
   const current_shift_processed =
     shift.current_shift === "SHIFT_1"
@@ -408,38 +470,45 @@ export async function loadTeleDashboardData(
   const current_shift_target = shift.shift_active ? SHIFT_TARGET : 0;
 
   const assigned_count = holdingsRows.length;
-  const active_holding = holdingsRows.filter((r) => {
-    const fs = String(r.current_status ?? "").toUpperCase();
-    const expired =
-      r.lease_expires_at &&
-      new Date(String(r.lease_expires_at)).getTime() <= Date.now();
 
+  const active_holding = holdingsRows.filter((r) => {
+    const fs = normalizeStatus(r.current_status);
+    const expired = isExpiredIso(r.lease_expires_at);
     return !expired && fs !== "DONE" && fs !== "INVALID";
   }).length;
 
-  const callback_holding = holdingsRows.filter(
-    (r) => String(r.current_status ?? "").toUpperCase() === "CALLBACK"
+  const callback_holding = holdingsRows.filter((r) =>
+    isCallbackStatus(r.current_status)
   ).length;
 
   const stale_holding = holdingsRows.filter((r) => {
-    const fs = String(r.current_status ?? "").toUpperCase();
-    const expired =
-      r.lease_expires_at &&
-      new Date(String(r.lease_expires_at)).getTime() <= Date.now();
-
+    const fs = normalizeStatus(r.current_status);
+    const expired = isExpiredIso(r.lease_expires_at);
     return expired && fs === "ASSIGNED";
   }).length;
 
-  const recent: TeleDashboardRecentRow[] = recentRowsRaw.map((r) => ({
-    call_log_id: String(r.call_log_id),
-    called_at: String(r.called_at),
-    company_name: r["Company Name"] ? String(r["Company Name"]) : null,
-    person_id: r["Person ID"] ? String(r["Person ID"]) : null,
-    final_status: r.final_status ? String(r.final_status) : null,
-    group_name: r.group_name ? String(r.group_name) : null,
-    detail_name: r.detail_name ? String(r.detail_name) : null,
-    note_text: r.note_text ? String(r.note_text) : null,
-  }));
+  const shift_activity: TeleShiftActivityRow[] = shiftActivityRowsRaw.map((r) => {
+    const telephone_number = asTrimmedString(r["Telephone Number"]);
+    const mobile_number = asTrimmedString(r["Mobile Number"]);
+
+    return {
+      call_log_id: String(r.call_log_id),
+      called_at: String(r.called_at),
+
+      company_name: asTrimmedString(r["Company Name"]),
+      person_id: asTrimmedString(r["Person ID"]),
+      customer_name: buildCustomerName(r),
+
+      phone: telephone_number ?? mobile_number,
+      telephone_number,
+      mobile_number,
+
+      final_status: asTrimmedString(r.final_status),
+      group_name: asTrimmedString(r.group_name),
+      detail_name: asTrimmedString(r.detail_name),
+      note_text: asTrimmedString(r.note_text),
+    };
+  });
 
   let by_terminal_today_rank: number | null = null;
   let by_conversion_rank: number | null = null;
@@ -501,8 +570,7 @@ export async function loadTeleDashboardData(
       const teleId = String(row.tele_id ?? "");
       if (!teleId) continue;
 
-      const fs = String(row.final_status ?? "").toUpperCase();
-      if (fs === "DONE" || fs === "INVALID") {
+      if (isTerminalStatus(row.final_status)) {
         ensureTele(teleId).terminal_today += 1;
       }
     }
@@ -513,7 +581,8 @@ export async function loadTeleDashboardData(
 
       const t = ensureTele(teleId);
       t.total_calls += 1;
-      if (String(row.final_status ?? "").toUpperCase() === "DONE") {
+
+      if (isDoneStatus(row.final_status)) {
         t.done_total += 1;
       }
     }
@@ -562,9 +631,11 @@ export async function loadTeleDashboardData(
   }
 
   const dailyMap = new Map<string, TeleWeeklyTrendRow>();
+
   for (let i = 0; i < 7; i++) {
     const d = addDays(new Date(), -6 + i);
     const key = toIsoDate(d);
+
     dailyMap.set(key, {
       date_label: key.slice(5),
       calls: 0,
@@ -579,10 +650,9 @@ export async function loadTeleDashboardData(
     const bucket = dailyMap.get(dayKey);
     if (!bucket) continue;
 
-    const fs = String(row.final_status ?? "").toUpperCase();
     bucket.calls += 1;
-    if (fs === "DONE") bucket.done += 1;
-    if (fs === "DONE" || fs === "INVALID") bucket.terminal += 1;
+    if (isDoneStatus(row.final_status)) bucket.done += 1;
+    if (isTerminalStatus(row.final_status)) bucket.terminal += 1;
   }
 
   const weekly_trend = Array.from(dailyMap.values());
@@ -639,7 +709,9 @@ export async function loadTeleDashboardData(
       overdue_callbacks: overdueRows.length,
     },
 
-    recent,
+    shift_activity,
+    shift_activity_label: shiftActivityLabel,
+
     attention,
     health,
 
