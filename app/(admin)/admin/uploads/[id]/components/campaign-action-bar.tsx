@@ -6,19 +6,29 @@ import { supabase } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
+import AppendImportDialog from "./AppendImportDialog";
+import PurgeCampaignDialog from "./PurgeCampaignDialog";
+import DeleteBatchDialog from "./DeleteBatchDialog";
+
+import { useCampaignAppendImport } from "../hooks/useCampaignAppendImport";
+import { useCampaignPurge } from "../hooks/useCampaignPurge";
+
 export function CampaignActionBar(props: {
   uploadId: string;
   campaignStatus?: string | null;
   onAfterCleanup?: () => Promise<void> | void;
+  onAfterMutation?: () => Promise<void> | void;
 }) {
-  const { uploadId, campaignStatus, onAfterCleanup } = props;
+  const { uploadId, campaignStatus, onAfterCleanup, onAfterMutation } = props;
+
+  const appendVm = useCampaignAppendImport(uploadId);
+  const purgeVm = useCampaignPurge(uploadId);
 
   const [cleaning, setCleaning] = useState(false);
   const [message, setMessage] = useState("");
   const [errorText, setErrorText] = useState("");
 
-  const disabledByStatus =
-    String(campaignStatus ?? "").toUpperCase() === "DONE";
+  const disabledByStatus = String(campaignStatus ?? "").toUpperCase() === "DONE";
 
   const handleCleanup = async () => {
     if (!uploadId) return;
@@ -104,6 +114,27 @@ export function CampaignActionBar(props: {
               <Button
                 variant="outline"
                 size="sm"
+                onClick={() => {
+                  appendVm.reset();
+                  appendVm.setOpen(true);
+                }}
+                disabled={disabledByStatus}
+              >
+                Import More
+              </Button>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void purgeVm.openPurge()}
+                disabled={disabledByStatus}
+              >
+                Purge Data
+              </Button>
+
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={handleCleanup}
                 disabled={cleaning || disabledByStatus}
               >
@@ -129,6 +160,28 @@ export function CampaignActionBar(props: {
           </CardContent>
         </Card>
       ) : null}
+
+      <AppendImportDialog
+        vm={appendVm}
+        onCompleted={async () => {
+          await onAfterMutation?.();
+        }}
+      />
+
+      <PurgeCampaignDialog
+        vm={purgeVm}
+        onCompleted={async () => {
+          await onAfterMutation?.();
+        }}
+      />
+
+      <DeleteBatchDialog
+        vm={purgeVm}
+        onCompleted={async () => {
+          purgeVm.setDeleteBatchOpen(false);
+          await onAfterMutation?.();
+        }}
+      />
     </div>
   );
 }

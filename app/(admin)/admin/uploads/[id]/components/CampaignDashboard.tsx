@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import CampaignStickySummary from "./CampaignStickySummary";
+import ImportBatchHistoryCard from "./ImportBatchHistoryCard";
+import DeleteBatchDialog from "./DeleteBatchDialog";
 import {
   buildCampaignAttention,
   fmtDT,
@@ -25,6 +27,8 @@ import type {
   CampaignStatusCount,
   CampaignTeamRow,
 } from "../lib/campaign-dashboard.types";
+import { useImportBatchHistory } from "../hooks/useImportBatchHistory";
+import { useCampaignPurge } from "../hooks/useCampaignPurge";
 
 function todayIsoDate() {
   const d = new Date();
@@ -114,8 +118,13 @@ export default function CampaignDashboard(props: {
   uploadId: string;
   campaignName?: string | null;
   campaignStatus?: string | null;
+  refreshToken?: number;
+  onAfterBatchDeleted?: () => Promise<void> | void;
 }) {
-  const { uploadId, campaignName, campaignStatus } = props;
+  const { uploadId, campaignName, campaignStatus, refreshToken, onAfterBatchDeleted } = props;
+
+  const importHistoryVm = useImportBatchHistory(uploadId);
+  const batchPurgeVm = useCampaignPurge(uploadId);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -481,6 +490,11 @@ export default function CampaignDashboard(props: {
   useEffect(() => {
     void loadDashboard("initial");
   }, [loadDashboard]);
+
+  useEffect(() => {
+    if (refreshToken === undefined) return;
+    void loadDashboard("refresh");
+  }, [refreshToken, loadDashboard]);
 
   const health = useMemo(() => getCampaignHealth(data), [data]);
   const statusMap = useMemo(() => statusCountMap(data.statusCounts), [data.statusCounts]);
@@ -1019,6 +1033,24 @@ export default function CampaignDashboard(props: {
           </div>
         </CardContent>
       </Card>
+
+      <ImportBatchHistoryCard
+        historyVm={importHistoryVm}
+        purgeVm={batchPurgeVm}
+        refreshToken={refreshToken}
+        onAfterBatchDeleted={async () => {
+          await onAfterBatchDeleted?.();
+        }}
+      />
+
+      <DeleteBatchDialog
+        vm={batchPurgeVm}
+        onCompleted={async () => {
+          batchPurgeVm.setDeleteBatchOpen(false);
+          await importHistoryVm.load();
+          await onAfterBatchDeleted?.();
+        }}
+      />
     </div>
   );
 }

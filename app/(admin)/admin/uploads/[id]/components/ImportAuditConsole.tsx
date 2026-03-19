@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 type ImportIssue = {
   id: string;
   upload_id: string;
+  import_batch_id?: string | null;
   row_no: number | null;
   reason: string;
   identity_key: string | null;
@@ -45,6 +46,7 @@ function toCsvValue(v: any) {
 function buildCsv(rows: ImportIssue[]) {
   const header = [
     "created_at",
+    "import_batch_id",
     "reason",
     "row_no",
     "kept_row_no",
@@ -57,6 +59,7 @@ function buildCsv(rows: ImportIssue[]) {
     lines.push(
       [
         toCsvValue(r.created_at),
+        toCsvValue(r.import_batch_id ?? ""),
         toCsvValue(r.reason),
         toCsvValue(r.row_no ?? ""),
         toCsvValue(r.kept_row_no ?? ""),
@@ -69,17 +72,21 @@ function buildCsv(rows: ImportIssue[]) {
   return lines.join("\n");
 }
 
-export default function ImportAuditConsole({ uploadId }: { uploadId: string }) {
+export default function ImportAuditConsole(props: {
+  uploadId: string;
+  refreshToken?: number;
+}) {
+  const { uploadId, refreshToken } = props;
+
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<ImportIssue[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   const [q, setQ] = useState("");
-  const [reason, setReason] = useState<string>(""); // empty = all
+  const [reason, setReason] = useState<string>("");
   const [page, setPage] = useState(1);
   const pageSize = 50;
 
-  // lightweight stats
   const reasonCounts = useMemo(() => {
     const map = new Map<string, number>();
     for (const it of items) map.set(it.reason, (map.get(it.reason) ?? 0) + 1);
@@ -94,6 +101,7 @@ export default function ImportAuditConsole({ uploadId }: { uploadId: string }) {
 
       const hay = [
         it.reason,
+        it.import_batch_id ?? "",
         it.identity_key ?? "",
         String(it.row_no ?? ""),
         String(it.kept_row_no ?? ""),
@@ -125,7 +133,7 @@ export default function ImportAuditConsole({ uploadId }: { uploadId: string }) {
     try {
       const { data, error } = await supabase
         .from("contact_import_issues")
-        .select("id,upload_id,row_no,reason,identity_key,kept_row_no,details,created_at")
+        .select("id,upload_id,import_batch_id,row_no,reason,identity_key,kept_row_no,details,created_at")
         .eq("upload_id", uploadId)
         .order("created_at", { ascending: true });
 
@@ -143,8 +151,7 @@ export default function ImportAuditConsole({ uploadId }: { uploadId: string }) {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uploadId]);
+  }, [uploadId, refreshToken]);
 
   const exportCsv = () => {
     const csv = buildCsv(filtered);
@@ -197,7 +204,7 @@ export default function ImportAuditConsole({ uploadId }: { uploadId: string }) {
 
         <div className="flex flex-wrap gap-2">
           <Input
-            placeholder="Search in reason/identity_key/details/row_no..."
+            placeholder="Search in batch/reason/identity_key/details/row_no..."
             value={q}
             onChange={(e) => setQ(e.target.value)}
             className="max-w-md"
@@ -255,6 +262,12 @@ export default function ImportAuditConsole({ uploadId }: { uploadId: string }) {
                       <span className="font-medium tabular-nums">{it.kept_row_no ?? "—"}</span>
                     </div>
                   </div>
+
+                  {it.import_batch_id ? (
+                    <div className="text-xs opacity-70 break-all">
+                      batch: {it.import_batch_id}
+                    </div>
+                  ) : null}
 
                   {it.identity_key ? (
                     <div className="text-xs font-mono break-all opacity-80">

@@ -32,6 +32,9 @@ export default function UploadDetailPage() {
   const initialTab = useMemo(() => normTab(sp.get("tab")), [sp]);
   const [tab, setTab] = useState<TabKey>(initialTab);
 
+  const [refreshToken, setRefreshToken] = useState(0);
+  const bumpRefreshToken = () => setRefreshToken((x) => x + 1);
+
   useEffect(() => {
     setTab(normTab(sp.get("tab")));
   }, [sp]);
@@ -67,6 +70,11 @@ export default function UploadDetailPage() {
         campaignStatus={vm.upload?.status ?? null}
         onAfterCleanup={async () => {
           await vm.refreshAll();
+          bumpRefreshToken();
+        }}
+        onAfterMutation={async () => {
+          await vm.refreshAll();
+          bumpRefreshToken();
         }}
       />
 
@@ -74,6 +82,11 @@ export default function UploadDetailPage() {
         uploadId={id}
         campaignName={vm.upload?.campaign_name ?? null}
         campaignStatus={vm.upload?.status ?? null}
+        refreshToken={refreshToken}
+        onAfterBatchDeleted={async () => {
+          await vm.refreshAll();
+          bumpRefreshToken();
+        }}
       />
 
       <TeleAccessCard vm={vm} />
@@ -103,7 +116,7 @@ export default function UploadDetailPage() {
       </div>
 
       {tab === "audit" ? (
-        <ImportAuditConsole uploadId={id} />
+        <ImportAuditConsole uploadId={id} refreshToken={refreshToken} />
       ) : (
         <ContactsConsole vm={vm} editor={editor} />
       )}
@@ -112,6 +125,7 @@ export default function UploadDetailPage() {
         vm={editor}
         onSaved={async () => {
           await Promise.all([vm.loadKpis(), vm.loadContacts(), vm.loadUpload()]);
+          bumpRefreshToken();
         }}
       />
     </div>
