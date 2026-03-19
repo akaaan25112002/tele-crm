@@ -34,6 +34,7 @@ import {
 const AUTO_REFRESH_MS = 60_000;
 
 type ActivityFilter = "ALL" | "DONE" | "INVALID" | "CALLBACK";
+type KpiFilter = "ALL" | "KPI_ONLY" | "NON_KPI";
 
 function MiniStat(props: { label: string; value: number | string }) {
   return (
@@ -164,21 +165,26 @@ const EMPTY_DATA: TeleDashboardData = {
     remaining_to_day: 200,
   },
   campaign_rank: {
-    by_terminal_today_rank: null,
+    by_kpi_today_rank: null,
     by_conversion_rank: null,
     team_size: 0,
   },
   team_average: {
-    avg_terminal_today: 0,
+    avg_kpi_today: 0,
     avg_done_total: 0,
     avg_conversion_rate: 0,
   },
   weekly_trend: [],
+  kpi: {
+    kpi_today: 0,
+    kpi_total: 0,
+  },
 };
 
 function filterShiftActivity(
   rows: TeleShiftActivityRow[],
   statusFilter: ActivityFilter,
+  kpiFilter: KpiFilter,
   keyword: string
 ) {
   const q = keyword.trim().toLowerCase();
@@ -187,6 +193,14 @@ function filterShiftActivity(
     const status = String(row.final_status ?? "").trim().toUpperCase();
 
     if (statusFilter !== "ALL" && status !== statusFilter) {
+      return false;
+    }
+
+    if (kpiFilter === "KPI_ONLY" && !row.is_kpi_eligible) {
+      return false;
+    }
+
+    if (kpiFilter === "NON_KPI" && row.is_kpi_eligible) {
       return false;
     }
 
@@ -221,6 +235,7 @@ export default function TeleDashboardPage() {
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>("");
 
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("ALL");
+  const [kpiFilter, setKpiFilter] = useState<KpiFilter>("ALL");
   const [activityKeyword, setActivityKeyword] = useState("");
 
   const [data, setData] = useState<TeleDashboardData>(EMPTY_DATA);
@@ -284,15 +299,15 @@ export default function TeleDashboardPage() {
   const weeklyMax = useMemo(() => {
     return Math.max(
       1,
-      ...data.weekly_trend.map((x) => Math.max(x.calls, x.done, x.terminal))
+      ...data.weekly_trend.map((x) => Math.max(x.calls, x.done, x.terminal, x.kpi))
     );
   }, [data.weekly_trend]);
 
   const tone = useMemo(() => healthToneClass(data.health), [data.health]);
 
   const filteredShiftActivity = useMemo(() => {
-    return filterShiftActivity(data.shift_activity, activityFilter, activityKeyword);
-  }, [data.shift_activity, activityFilter, activityKeyword]);
+    return filterShiftActivity(data.shift_activity, activityFilter, kpiFilter, activityKeyword);
+  }, [data.shift_activity, activityFilter, kpiFilter, activityKeyword]);
 
   const activityCountSummary = useMemo(() => {
     const all = data.shift_activity.length;
@@ -305,8 +320,9 @@ export default function TeleDashboardPage() {
     const callback = data.shift_activity.filter(
       (x) => String(x.final_status ?? "").toUpperCase() === "CALLBACK"
     ).length;
+    const kpiEligible = data.shift_activity.filter((x) => x.is_kpi_eligible).length;
 
-    return { all, done, invalid, callback };
+    return { all, done, invalid, callback, kpiEligible };
   }, [data.shift_activity]);
 
   if (loading) {
@@ -404,7 +420,7 @@ export default function TeleDashboardPage() {
           <div className="grid gap-4 md:grid-cols-2">
             <div className="rounded-xl border p-4">
               <div className="flex items-center justify-between text-sm">
-                <span className="opacity-70">Current shift progress</span>
+                <span className="opacity-70">Current shift KPI progress</span>
                 <span className="font-medium">
                   {data.shift_progress.current_shift_processed}/{data.shift_progress.current_shift_target || 100}
                 </span>
@@ -419,7 +435,7 @@ export default function TeleDashboardPage() {
 
             <div className="rounded-xl border p-4">
               <div className="flex items-center justify-between text-sm">
-                <span className="opacity-70">Daily progress</span>
+                <span className="opacity-70">Daily KPI progress</span>
                 <span className="font-medium">
                   {data.shift_progress.day_processed}/{data.shift_progress.day_target}
                 </span>
@@ -435,9 +451,9 @@ export default function TeleDashboardPage() {
         <SectionCard title="Shift Breakdown">
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             <MiniStat label="Shift 1 Target" value={data.shift_progress.shift_1_target} />
-            <MiniStat label="Shift 1 Processed" value={data.shift_progress.shift_1_processed} />
+            <MiniStat label="Shift 1 KPI" value={data.shift_progress.shift_1_processed} />
             <MiniStat label="Shift 2 Target" value={data.shift_progress.shift_2_target} />
-            <MiniStat label="Shift 2 Processed" value={data.shift_progress.shift_2_processed} />
+            <MiniStat label="Shift 2 KPI" value={data.shift_progress.shift_2_processed} />
           </div>
 
           <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -481,10 +497,10 @@ export default function TeleDashboardPage() {
         <SectionCard title="My Rank in This Campaign Team">
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
             <MiniStat
-              label="Terminal Today Rank"
+              label="KPI Today Rank"
               value={
-                data.campaign_rank.by_terminal_today_rank && data.campaign_rank.team_size
-                  ? `#${data.campaign_rank.by_terminal_today_rank}/${data.campaign_rank.team_size}`
+                data.campaign_rank.by_kpi_today_rank && data.campaign_rank.team_size
+                  ? `#${data.campaign_rank.by_kpi_today_rank}/${data.campaign_rank.team_size}`
                   : "—"
               }
             />
@@ -505,10 +521,10 @@ export default function TeleDashboardPage() {
         <SectionCard title="My KPI Today">
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
             <MiniStat label="Calls Today" value={data.summary.calls_today} />
+            <MiniStat label="KPI Today" value={data.kpi.kpi_today} />
             <MiniStat label="Done Today" value={data.summary.done_today} />
             <MiniStat label="Invalid Today" value={data.summary.invalid_today} />
             <MiniStat label="Callback Today" value={data.summary.callback_today} />
-            <MiniStat label="Terminal Today" value={data.summary.terminal_today} />
             <MiniStat label="Last Call" value={fmtDT(data.summary.last_call_at)} />
           </div>
         </SectionCard>
@@ -516,8 +532,8 @@ export default function TeleDashboardPage() {
         <SectionCard title="Team Average Comparison">
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
             <MiniStat
-              label="My Terminal Today / Team Avg"
-              value={`${data.summary.terminal_today} / ${data.team_average.avg_terminal_today}`}
+              label="My KPI Today / Team Avg"
+              value={`${data.kpi.kpi_today} / ${data.team_average.avg_kpi_today}`}
             />
             <MiniStat
               label="My Done Total / Team Avg"
@@ -534,11 +550,11 @@ export default function TeleDashboardPage() {
       <div className="grid gap-4 xl:grid-cols-2">
         <SectionCard title="My Campaign KPI">
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+            <MiniStat label="KPI Total" value={data.kpi.kpi_total} />
             <MiniStat label="Total Calls" value={data.summary.total_calls} />
             <MiniStat label="Done Total" value={data.summary.done_total} />
             <MiniStat label="Invalid Total" value={data.summary.invalid_total} />
             <MiniStat label="Callback Total" value={data.summary.callback_total} />
-            <MiniStat label="Terminal Total" value={data.summary.terminal_total} />
             <MiniStat label="Conversion %" value={pct(data.summary.conversion_rate)} />
           </div>
         </SectionCard>
@@ -591,7 +607,7 @@ export default function TeleDashboardPage() {
                   <div className="mb-2 flex items-center justify-between text-sm">
                     <span className="font-medium">{row.date_label}</span>
                     <span className="opacity-70">
-                      {row.calls} calls • {row.done} done • {row.terminal} terminal
+                      {row.calls} calls • {row.kpi} KPI • {row.done} done • {row.terminal} terminal
                     </span>
                   </div>
 
@@ -599,6 +615,11 @@ export default function TeleDashboardPage() {
                     <div>
                       <div className="mb-1 text-[11px] opacity-60">Calls</div>
                       <TrendBar value={row.calls} max={weeklyMax} />
+                    </div>
+
+                    <div>
+                      <div className="mb-1 text-[11px] opacity-60">KPI</div>
+                      <TrendBar value={row.kpi} max={weeklyMax} />
                     </div>
 
                     <div>
@@ -639,6 +660,22 @@ export default function TeleDashboardPage() {
               </Select>
             </div>
 
+            <div className="w-[150px]">
+              <Select
+                value={kpiFilter}
+                onValueChange={(v) => setKpiFilter(v as KpiFilter)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="KPI filter" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ALL">All</SelectItem>
+                  <SelectItem value="KPI_ONLY">KPI only</SelectItem>
+                  <SelectItem value="NON_KPI">Non-KPI</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
             <div className="w-[240px]">
               <Input
                 placeholder="Search name / company / phone / note..."
@@ -649,8 +686,9 @@ export default function TeleDashboardPage() {
           </div>
         }
       >
-        <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-5">
+        <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-6">
           <MiniStat label="All" value={activityCountSummary.all} />
+          <MiniStat label="KPI Eligible" value={activityCountSummary.kpiEligible} />
           <MiniStat label="DONE" value={activityCountSummary.done} />
           <MiniStat label="INVALID" value={activityCountSummary.invalid} />
           <MiniStat label="CALLBACK" value={activityCountSummary.callback} />
@@ -680,7 +718,14 @@ export default function TeleDashboardPage() {
                     <div className="mt-1 text-xs opacity-70">{fmtDT(item.called_at)}</div>
                   </div>
 
-                  <div>{finalStatusBadge(item.final_status)}</div>
+                  <div className="flex flex-col items-end gap-2">
+                    <div>{finalStatusBadge(item.final_status)}</div>
+                    {item.is_kpi_eligible ? (
+                      <Badge variant="outline">KPI</Badge>
+                    ) : (
+                      <Badge variant="secondary">Non-KPI</Badge>
+                    )}
+                  </div>
                 </div>
 
                 <div className="mt-2 text-sm opacity-80">

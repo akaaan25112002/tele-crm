@@ -11,6 +11,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           nav={[
             { href: "/admin", label: "Dashboard" },
             { href: "/admin/uploads", label: "Uploads" },
+            { href: "/admin/settings/kpi-rules", label: "KPI Rules" },
           ]}
         >
           {children}

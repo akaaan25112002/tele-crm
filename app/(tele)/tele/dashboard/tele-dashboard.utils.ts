@@ -35,7 +35,12 @@ function localDateParts(date = new Date()) {
 function buildLocalDateAt(hour: number, minute: number, second = 0, ms = 0) {
   const now = new Date();
   const { yyyy, mm, dd } = localDateParts(now);
-  return new Date(`${yyyy}-${mm}-${dd}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}.${String(ms).padStart(3, "0")}`);
+  return new Date(
+    `${yyyy}-${mm}-${dd}T${String(hour).padStart(2, "0")}:${String(minute).padStart(
+      2,
+      "0"
+    )}:${String(second).padStart(2, "0")}.${String(ms).padStart(3, "0")}`
+  );
 }
 
 export function getShiftInfo(now = new Date()): TeleShiftInfo {
@@ -78,7 +83,7 @@ export function getShiftInfo(now = new Date()): TeleShiftInfo {
 
 export function buildTeleAttention(input: {
   shift: TeleShiftInfo;
-  terminal_today: number;
+  kpi_today: number;
   current_shift_processed: number;
   active_holding: number;
   stale_holding: number;
@@ -115,8 +120,8 @@ export function buildTeleAttention(input: {
 
   if (input.shift.shift_active && input.current_shift_processed === 0 && input.active_holding > 0) {
     items.push({
-      title: "No completed contacts in current shift yet",
-      detail: `You are in ${input.shift.current_shift_label} but have not completed any terminal contact in this shift yet.`,
+      title: "No KPI-eligible contacts in current shift yet",
+      detail: `You are in ${input.shift.current_shift_label} but have not completed any KPI-eligible contact in this shift yet.`,
       tone: "warn",
     });
   }
@@ -127,8 +132,8 @@ export function buildTeleAttention(input: {
     input.current_shift_processed < input.current_shift_target
   ) {
     items.push({
-      title: "Current shift target still in progress",
-      detail: `${input.current_shift_processed}/${input.current_shift_target} contacts completed in ${input.shift.current_shift_label}.`,
+      title: "Current shift KPI still in progress",
+      detail: `${input.current_shift_processed}/${input.current_shift_target} KPI-eligible contacts completed in ${input.shift.current_shift_label}.`,
       tone: "default",
     });
   }
@@ -138,15 +143,15 @@ export function buildTeleAttention(input: {
     input.current_shift_processed >= input.current_shift_target
   ) {
     items.push({
-      title: "Current shift target achieved",
+      title: "Current shift KPI achieved",
       detail: `You have reached the 100-contact KPI for ${input.shift.current_shift_label}.`,
       tone: "good",
     });
   }
 
-  if (input.terminal_today >= input.day_target) {
+  if (input.kpi_today >= input.day_target) {
     items.push({
-      title: "Daily target achieved",
+      title: "Daily KPI achieved",
       detail: `You have reached or exceeded the 200-contact daily KPI.`,
       tone: "good",
     });
@@ -165,7 +170,7 @@ export function buildTeleAttention(input: {
 
 export function buildTeleHealth(input: {
   current_shift_processed: number;
-  terminal_today: number;
+  kpi_today: number;
   active_holding: number;
   stale_holding: number;
   overdue_callbacks: number;
@@ -176,15 +181,15 @@ export function buildTeleHealth(input: {
   let productivity_state: TeleDashboardHealth["productivity_state"] = "low";
   let productivity_label = "Low progress";
 
-  if (input.terminal_today >= input.day_target) {
+  if (input.kpi_today >= input.day_target) {
     productivity_state = "excellent";
-    productivity_label = "Daily target achieved";
+    productivity_label = "Daily KPI achieved";
   } else if (input.shift_active && input.current_shift_processed >= input.current_shift_target) {
     productivity_state = "good";
-    productivity_label = "Current shift target achieved";
+    productivity_label = "Current shift KPI achieved";
   } else if (input.shift_active && input.current_shift_processed === 0) {
     productivity_state = "idle";
-    productivity_label = "No completed contacts in current shift yet";
+    productivity_label = "No KPI-eligible contacts in current shift yet";
   }
 
   let queue_state: TeleDashboardHealth["queue_state"] = "healthy";

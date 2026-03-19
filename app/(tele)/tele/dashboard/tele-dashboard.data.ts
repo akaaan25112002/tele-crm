@@ -17,6 +17,16 @@ import {
 export const SHIFT_TARGET = 100;
 export const DAY_TARGET = 200;
 
+type KpiCallRow = {
+  call_log_id?: string | null;
+  tele_id?: string | null;
+  final_status?: string | null;
+  group_name?: string | null;
+  detail_name?: string | null;
+  called_at?: string | null;
+  is_kpi_eligible?: boolean | null;
+};
+
 function todayIsoDate() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -99,6 +109,14 @@ function isExpiredIso(iso: unknown): boolean {
 
 function countByStatus(rows: any[], predicate: (status: unknown) => boolean): number {
   return rows.filter((r) => predicate(r.final_status)).length;
+}
+
+function isKpiEligibleRow(row: KpiCallRow): boolean {
+  return Boolean(row.is_kpi_eligible === true);
+}
+
+function countKpiEligible(rows: KpiCallRow[]): number {
+  return rows.filter(isKpiEligibleRow).length;
 }
 
 function buildCustomerName(row: any): string | null {
@@ -342,16 +360,16 @@ export async function loadTeleDashboardData(
     supabase.from("upload_members").select("tele_id").eq("upload_id", uploadId),
 
     supabase
-      .from("v_call_logs_report")
-      .select("call_log_id, tele_id, final_status, called_at")
+      .from("v_call_logs_report_kpi")
+      .select("call_log_id, tele_id, final_status, group_name, detail_name, called_at, is_kpi_eligible")
       .eq("upload_id", uploadId)
       .eq("tele_id", uid)
       .gte("called_at", `${today}T00:00:00`)
       .lte("called_at", `${today}T23:59:59`),
 
     supabase
-      .from("v_call_logs_report")
-      .select("call_log_id, tele_id, final_status, called_at")
+      .from("v_call_logs_report_kpi")
+      .select("call_log_id, tele_id, final_status, group_name, detail_name, called_at, is_kpi_eligible")
       .eq("upload_id", uploadId)
       .eq("tele_id", uid)
       .order("called_at", { ascending: false }),
@@ -372,7 +390,7 @@ export async function loadTeleDashboardData(
       .lt("next_call_at", nowIso),
 
     supabase
-      .from("v_call_logs_report")
+      .from("v_call_logs_report_kpi")
       .select(
         [
           "call_log_id",
@@ -381,6 +399,7 @@ export async function loadTeleDashboardData(
           "group_name",
           "detail_name",
           "note_text",
+          "is_kpi_eligible",
           `"Person ID"`,
           `"Company Name"`,
           `"Given Name"`,
@@ -396,24 +415,24 @@ export async function loadTeleDashboardData(
       .order("called_at", { ascending: false }),
 
     supabase
-      .from("v_call_logs_report")
-      .select("tele_id, final_status, called_at")
+      .from("v_call_logs_report_kpi")
+      .select("tele_id, final_status, group_name, detail_name, called_at, is_kpi_eligible")
       .eq("upload_id", uploadId)
       .eq("tele_id", uid)
       .gte("called_at", weekStartIso)
       .order("called_at", { ascending: true }),
 
     supabase
-      .from("v_call_logs_report")
-      .select("tele_id, final_status, called_at")
+      .from("v_call_logs_report_kpi")
+      .select("tele_id, final_status, group_name, detail_name, called_at, is_kpi_eligible")
       .eq("upload_id", uploadId)
       .eq("tele_id", uid)
       .gte("called_at", shift1StartIso)
       .lte("called_at", shift1EndIso),
 
     supabase
-      .from("v_call_logs_report")
-      .select("tele_id, final_status, called_at")
+      .from("v_call_logs_report_kpi")
+      .select("tele_id, final_status, group_name, detail_name, called_at, is_kpi_eligible")
       .eq("upload_id", uploadId)
       .eq("tele_id", uid)
       .gte("called_at", shift2StartIso)
@@ -438,14 +457,14 @@ export async function loadTeleDashboardData(
     )
   );
 
-  const callsTodayRows = ((personalCallsTodayRes.data as any[]) ?? []) as any[];
-  const callsAllRows = ((personalCallsAllRes.data as any[]) ?? []) as any[];
+  const callsTodayRows = ((personalCallsTodayRes.data as any[]) ?? []) as KpiCallRow[];
+  const callsAllRows = ((personalCallsAllRes.data as any[]) ?? []) as KpiCallRow[];
   const holdingsRows = ((holdingsRes.data as any[]) ?? []) as any[];
   const overdueRows = ((overdueRes.data as any[]) ?? []) as any[];
   const shiftActivityRowsRaw = ((shiftActivityRes.data as any[]) ?? []) as any[];
-  const weeklyRowsRaw = ((weeklyRes.data as any[]) ?? []) as any[];
-  const shift1Rows = ((shift1Res.data as any[]) ?? []) as any[];
-  const shift2Rows = ((shift2Res.data as any[]) ?? []) as any[];
+  const weeklyRowsRaw = ((weeklyRes.data as any[]) ?? []) as KpiCallRow[];
+  const shift1Rows = ((shift1Res.data as any[]) ?? []) as KpiCallRow[];
+  const shift2Rows = ((shift2Res.data as any[]) ?? []) as KpiCallRow[];
 
   const done_today = countByStatus(callsTodayRows, isDoneStatus);
   const callback_today = countByStatus(callsTodayRows, isCallbackStatus);
@@ -457,8 +476,10 @@ export async function loadTeleDashboardData(
   const invalid_total = countByStatus(callsAllRows, isInvalidStatus);
   const terminal_total = countByStatus(callsAllRows, isTerminalStatus);
 
-  const shift_1_processed = countByStatus(shift1Rows, isTerminalStatus);
-  const shift_2_processed = countByStatus(shift2Rows, isTerminalStatus);
+  const shift_1_processed = countKpiEligible(shift1Rows);
+  const shift_2_processed = countKpiEligible(shift2Rows);
+  const kpi_today = countKpiEligible(callsTodayRows);
+  const kpi_total = countKpiEligible(callsAllRows);
 
   const current_shift_processed =
     shift.current_shift === "SHIFT_1"
@@ -507,29 +528,31 @@ export async function loadTeleDashboardData(
       group_name: asTrimmedString(r.group_name),
       detail_name: asTrimmedString(r.detail_name),
       note_text: asTrimmedString(r.note_text),
+
+      is_kpi_eligible: Boolean(r.is_kpi_eligible),
     };
   });
 
-  let by_terminal_today_rank: number | null = null;
+  let by_kpi_today_rank: number | null = null;
   let by_conversion_rank: number | null = null;
   let team_size = 0;
-  let avg_terminal_today = 0;
+  let avg_kpi_today = 0;
   let avg_done_total = 0;
   let avg_conversion_rate = 0;
 
   if (memberTeleIds.length > 0) {
     const [teamCallsTodayRes, teamCallsAllRes] = await Promise.all([
       supabase
-        .from("v_call_logs_report")
-        .select("tele_id, final_status, called_at")
+        .from("v_call_logs_report_kpi")
+        .select("tele_id, final_status, group_name, detail_name, called_at, is_kpi_eligible")
         .eq("upload_id", uploadId)
         .in("tele_id", memberTeleIds)
         .gte("called_at", `${today}T00:00:00`)
         .lte("called_at", `${today}T23:59:59`),
 
       supabase
-        .from("v_call_logs_report")
-        .select("tele_id, final_status, called_at")
+        .from("v_call_logs_report_kpi")
+        .select("tele_id, final_status, group_name, detail_name, called_at, is_kpi_eligible")
         .eq("upload_id", uploadId)
         .in("tele_id", memberTeleIds),
     ]);
@@ -537,13 +560,13 @@ export async function loadTeleDashboardData(
     if (teamCallsTodayRes.error) throw teamCallsTodayRes.error;
     if (teamCallsAllRes.error) throw teamCallsAllRes.error;
 
-    const teamCallsTodayRows = ((teamCallsTodayRes.data as any[]) ?? []) as any[];
-    const teamCallsAllRows = ((teamCallsAllRes.data as any[]) ?? []) as any[];
+    const teamCallsTodayRows = ((teamCallsTodayRes.data as any[]) ?? []) as KpiCallRow[];
+    const teamCallsAllRows = ((teamCallsAllRes.data as any[]) ?? []) as KpiCallRow[];
 
     const perTeleMap = new Map<
       string,
       {
-        terminal_today: number;
+        kpi_today: number;
         total_calls: number;
         done_total: number;
         conversion_rate: number;
@@ -554,7 +577,7 @@ export async function loadTeleDashboardData(
       let row = perTeleMap.get(teleId);
       if (!row) {
         row = {
-          terminal_today: 0,
+          kpi_today: 0,
           total_calls: 0,
           done_total: 0,
           conversion_rate: 0,
@@ -570,8 +593,8 @@ export async function loadTeleDashboardData(
       const teleId = String(row.tele_id ?? "");
       if (!teleId) continue;
 
-      if (isTerminalStatus(row.final_status)) {
-        ensureTele(teleId).terminal_today += 1;
+      if (isKpiEligibleRow(row)) {
+        ensureTele(teleId).kpi_today += 1;
       }
     }
 
@@ -589,7 +612,7 @@ export async function loadTeleDashboardData(
 
     const allTeam = Array.from(perTeleMap.entries()).map(([tele_id, v]) => ({
       tele_id,
-      terminal_today: v.terminal_today,
+      kpi_today: v.kpi_today,
       total_calls: v.total_calls,
       done_total: v.done_total,
       conversion_rate: safePct(v.done_total, v.total_calls),
@@ -598,8 +621,8 @@ export async function loadTeleDashboardData(
     team_size = allTeam.length;
 
     if (team_size > 0) {
-      avg_terminal_today = Number(
-        (allTeam.reduce((sum, r) => sum + r.terminal_today, 0) / team_size).toFixed(1)
+      avg_kpi_today = Number(
+        (allTeam.reduce((sum, r) => sum + r.kpi_today, 0) / team_size).toFixed(1)
       );
       avg_done_total = Number(
         (allTeam.reduce((sum, r) => sum + r.done_total, 0) / team_size).toFixed(1)
@@ -608,9 +631,9 @@ export async function loadTeleDashboardData(
         (allTeam.reduce((sum, r) => sum + r.conversion_rate, 0) / team_size).toFixed(1)
       );
 
-      const byTerminal = [...allTeam].sort((a, b) => {
-        if (b.terminal_today !== a.terminal_today) {
-          return b.terminal_today - a.terminal_today;
+      const byKpi = [...allTeam].sort((a, b) => {
+        if (b.kpi_today !== a.kpi_today) {
+          return b.kpi_today - a.kpi_today;
         }
         return b.done_total - a.done_total;
       });
@@ -622,10 +645,10 @@ export async function loadTeleDashboardData(
         return b.done_total - a.done_total;
       });
 
-      const terminalIndex = byTerminal.findIndex((r) => r.tele_id === uid);
+      const kpiIndex = byKpi.findIndex((r) => r.tele_id === uid);
       const conversionIndex = byConversion.findIndex((r) => r.tele_id === uid);
 
-      by_terminal_today_rank = terminalIndex >= 0 ? terminalIndex + 1 : null;
+      by_kpi_today_rank = kpiIndex >= 0 ? kpiIndex + 1 : null;
       by_conversion_rank = conversionIndex >= 0 ? conversionIndex + 1 : null;
     }
   }
@@ -641,6 +664,7 @@ export async function loadTeleDashboardData(
       calls: 0,
       done: 0,
       terminal: 0,
+      kpi: 0,
     });
   }
 
@@ -653,13 +677,14 @@ export async function loadTeleDashboardData(
     bucket.calls += 1;
     if (isDoneStatus(row.final_status)) bucket.done += 1;
     if (isTerminalStatus(row.final_status)) bucket.terminal += 1;
+    if (isKpiEligibleRow(row)) bucket.kpi += 1;
   }
 
   const weekly_trend = Array.from(dailyMap.values());
 
   const health = buildTeleHealth({
     current_shift_processed,
-    terminal_today,
+    kpi_today,
     active_holding,
     stale_holding,
     overdue_callbacks: overdueRows.length,
@@ -670,7 +695,7 @@ export async function loadTeleDashboardData(
 
   const attention = buildTeleAttention({
     shift,
-    terminal_today,
+    kpi_today,
     current_shift_processed,
     active_holding,
     stale_holding,
@@ -723,7 +748,7 @@ export async function loadTeleDashboardData(
 
       shift_1_processed,
       shift_2_processed,
-      day_processed: terminal_today,
+      day_processed: kpi_today,
 
       current_shift_target,
       current_shift_processed,
@@ -733,26 +758,31 @@ export async function loadTeleDashboardData(
 
       shift_1_progress_pct: safePct(shift_1_processed, SHIFT_TARGET),
       shift_2_progress_pct: safePct(shift_2_processed, SHIFT_TARGET),
-      day_progress_pct: safePct(terminal_today, DAY_TARGET),
+      day_progress_pct: safePct(kpi_today, DAY_TARGET),
 
       remaining_to_current_shift: shift.shift_active
         ? Math.max(0, SHIFT_TARGET - current_shift_processed)
         : 0,
-      remaining_to_day: Math.max(0, DAY_TARGET - terminal_today),
+      remaining_to_day: Math.max(0, DAY_TARGET - kpi_today),
     },
 
     campaign_rank: {
-      by_terminal_today_rank,
+      by_kpi_today_rank,
       by_conversion_rank,
       team_size,
     },
 
     team_average: {
-      avg_terminal_today,
+      avg_kpi_today,
       avg_done_total,
       avg_conversion_rate,
     },
 
     weekly_trend,
+
+    kpi: {
+      kpi_today,
+      kpi_total,
+    },
   };
 }

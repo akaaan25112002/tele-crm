@@ -75,16 +75,20 @@ const EMPTY_DATA: TeleDashboardData = {
     remaining_to_day: 200,
   },
   campaign_rank: {
-    by_terminal_today_rank: null,
+    by_kpi_today_rank: null,
     by_conversion_rank: null,
     team_size: 0,
   },
   team_average: {
-    avg_terminal_today: 0,
+    avg_kpi_today: 0,
     avg_done_total: 0,
     avg_conversion_rate: 0,
   },
   weekly_trend: [],
+  kpi: {
+    kpi_today: 0,
+    kpi_total: 0,
+  },
 };
 
 function Chip(props: { label: string; value: number | string }) {
