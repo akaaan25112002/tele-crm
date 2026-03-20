@@ -44,6 +44,11 @@ export type TeleDashboardSummary = {
   last_call_at: string | null;
 };
 
+export type TeleKpiSummary = {
+  kpi_today: number;
+  kpi_total: number;
+};
+
 export type TeleDashboardQueue = {
   assigned_count: number;
   active_holding: number;
@@ -68,7 +73,6 @@ export type TeleShiftActivityRow = {
   group_name: string | null;
   detail_name: string | null;
   note_text: string | null;
-
   is_kpi_eligible: boolean;
 };
 
@@ -134,16 +138,12 @@ export type TeleWeeklyTrendRow = {
   kpi: number;
 };
 
-export type TeleKpiSummary = {
-  kpi_today: number;
-  kpi_total: number;
-};
-
 export type TeleDashboardData = {
   campaign: ActiveCampaignInfo | null;
   progress: CampaignProgressTele | null;
 
   summary: TeleDashboardSummary;
+  kpi: TeleKpiSummary;
   queue: TeleDashboardQueue;
 
   shift_activity: TeleShiftActivityRow[];
@@ -159,6 +159,4 @@ export type TeleDashboardData = {
   team_average: TeleTeamAverage;
 
   weekly_trend: TeleWeeklyTrendRow[];
-
-  kpi: TeleKpiSummary;
 };

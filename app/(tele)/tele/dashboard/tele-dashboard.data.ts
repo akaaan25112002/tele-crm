@@ -24,7 +24,7 @@ type KpiCallRow = {
   group_name?: string | null;
   detail_name?: string | null;
   called_at?: string | null;
-  is_kpi_eligible?: boolean | null;
+  is_kpi_eligible?: boolean | string | number | null;
 };
 
 function todayIsoDate() {
@@ -79,6 +79,22 @@ function asTrimmedString(value: unknown): string | null {
   return s || null;
 }
 
+function asBoolean(value: unknown): boolean {
+  if (value === true) return true;
+  if (value === false) return false;
+
+  if (typeof value === "string") {
+    const s = value.trim().toLowerCase();
+    return s === "true" || s === "t" || s === "1" || s === "yes";
+  }
+
+  if (typeof value === "number") {
+    return value === 1;
+  }
+
+  return false;
+}
+
 function normalizeStatus(value: unknown): string {
   return String(value ?? "").trim().toUpperCase();
 }
@@ -107,12 +123,15 @@ function isExpiredIso(iso: unknown): boolean {
   return ms <= Date.now();
 }
 
-function countByStatus(rows: any[], predicate: (status: unknown) => boolean): number {
+function countByStatus(
+  rows: Array<{ final_status?: unknown }>,
+  predicate: (status: unknown) => boolean
+): number {
   return rows.filter((r) => predicate(r.final_status)).length;
 }
 
 function isKpiEligibleRow(row: KpiCallRow): boolean {
-  return Boolean(row.is_kpi_eligible === true);
+  return asBoolean(row.is_kpi_eligible);
 }
 
 function countKpiEligible(rows: KpiCallRow[]): number {
@@ -130,7 +149,6 @@ function buildCustomerName(row: any): string | null {
     .trim();
 
   if (full) return full;
-
   return asTrimmedString(row["Company Name"]);
 }
 
@@ -528,8 +546,7 @@ export async function loadTeleDashboardData(
       group_name: asTrimmedString(r.group_name),
       detail_name: asTrimmedString(r.detail_name),
       note_text: asTrimmedString(r.note_text),
-
-      is_kpi_eligible: Boolean(r.is_kpi_eligible),
+      is_kpi_eligible: asBoolean(r.is_kpi_eligible),
     };
   });
 
@@ -726,6 +743,11 @@ export async function loadTeleDashboardData(
       last_call_at: callsAllRows[0]?.called_at ? String(callsAllRows[0].called_at) : null,
     },
 
+    kpi: {
+      kpi_today,
+      kpi_total,
+    },
+
     queue: {
       assigned_count,
       active_holding,
@@ -779,10 +801,5 @@ export async function loadTeleDashboardData(
     },
 
     weekly_trend,
-
-    kpi: {
-      kpi_today,
-      kpi_total,
-    },
   };
 }

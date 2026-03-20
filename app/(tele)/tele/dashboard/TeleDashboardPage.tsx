@@ -33,8 +33,7 @@ import {
 
 const AUTO_REFRESH_MS = 60_000;
 
-type ActivityFilter = "ALL" | "DONE" | "INVALID" | "CALLBACK";
-type KpiFilter = "ALL" | "KPI_ONLY" | "NON_KPI";
+type ActivityFilter = "ALL" | "KPI" | "NON_KPI" | "DONE" | "INVALID" | "CALLBACK";
 
 function MiniStat(props: { label: string; value: number | string }) {
   return (
@@ -80,6 +79,14 @@ function finalStatusBadge(fs?: string | null) {
   return <Badge variant="outline">{text}</Badge>;
 }
 
+function kpiBadge(isKpiEligible: boolean) {
+  return isKpiEligible ? (
+    <Badge className="bg-sky-600 text-white hover:bg-sky-600">KPI</Badge>
+  ) : (
+    <Badge variant="secondary">Non-KPI</Badge>
+  );
+}
+
 function ProgressBar(props: { value: number }) {
   const v = clamp(Number(props.value ?? 0), 0, 100);
   return (
@@ -104,7 +111,6 @@ function buildActivityPhones(row: TeleShiftActivityRow) {
   );
 
   if (parts.length === 0) return "—";
-
   return parts.join(" | ");
 }
 
@@ -124,6 +130,10 @@ const EMPTY_DATA: TeleDashboardData = {
     terminal_total: 0,
     conversion_rate: 0,
     last_call_at: null,
+  },
+  kpi: {
+    kpi_today: 0,
+    kpi_total: 0,
   },
   queue: {
     assigned_count: 0,
@@ -175,16 +185,11 @@ const EMPTY_DATA: TeleDashboardData = {
     avg_conversion_rate: 0,
   },
   weekly_trend: [],
-  kpi: {
-    kpi_today: 0,
-    kpi_total: 0,
-  },
 };
 
 function filterShiftActivity(
   rows: TeleShiftActivityRow[],
   statusFilter: ActivityFilter,
-  kpiFilter: KpiFilter,
   keyword: string
 ) {
   const q = keyword.trim().toLowerCase();
@@ -192,15 +197,9 @@ function filterShiftActivity(
   return rows.filter((row) => {
     const status = String(row.final_status ?? "").trim().toUpperCase();
 
-    if (statusFilter !== "ALL" && status !== statusFilter) {
-      return false;
-    }
-
-    if (kpiFilter === "KPI_ONLY" && !row.is_kpi_eligible) {
-      return false;
-    }
-
-    if (kpiFilter === "NON_KPI" && row.is_kpi_eligible) {
+    if (statusFilter === "KPI" && !row.is_kpi_eligible) return false;
+    if (statusFilter === "NON_KPI" && row.is_kpi_eligible) return false;
+    if (statusFilter !== "ALL" && statusFilter !== "KPI" && statusFilter !== "NON_KPI" && status !== statusFilter) {
       return false;
     }
 
@@ -216,6 +215,7 @@ function filterShiftActivity(
       row.detail_name ?? "",
       row.note_text ?? "",
       row.final_status ?? "",
+      row.is_kpi_eligible ? "kpi" : "non-kpi",
     ]
       .join(" ")
       .toLowerCase();
@@ -235,7 +235,6 @@ export default function TeleDashboardPage() {
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>("");
 
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("ALL");
-  const [kpiFilter, setKpiFilter] = useState<KpiFilter>("ALL");
   const [activityKeyword, setActivityKeyword] = useState("");
 
   const [data, setData] = useState<TeleDashboardData>(EMPTY_DATA);
@@ -306,11 +305,13 @@ export default function TeleDashboardPage() {
   const tone = useMemo(() => healthToneClass(data.health), [data.health]);
 
   const filteredShiftActivity = useMemo(() => {
-    return filterShiftActivity(data.shift_activity, activityFilter, kpiFilter, activityKeyword);
-  }, [data.shift_activity, activityFilter, kpiFilter, activityKeyword]);
+    return filterShiftActivity(data.shift_activity, activityFilter, activityKeyword);
+  }, [data.shift_activity, activityFilter, activityKeyword]);
 
   const activityCountSummary = useMemo(() => {
     const all = data.shift_activity.length;
+    const kpi = data.shift_activity.filter((x) => x.is_kpi_eligible).length;
+    const nonKpi = data.shift_activity.filter((x) => !x.is_kpi_eligible).length;
     const done = data.shift_activity.filter(
       (x) => String(x.final_status ?? "").toUpperCase() === "DONE"
     ).length;
@@ -320,9 +321,8 @@ export default function TeleDashboardPage() {
     const callback = data.shift_activity.filter(
       (x) => String(x.final_status ?? "").toUpperCase() === "CALLBACK"
     ).length;
-    const kpiEligible = data.shift_activity.filter((x) => x.is_kpi_eligible).length;
 
-    return { all, done, invalid, callback, kpiEligible };
+    return { all, kpi, nonKpi, done, invalid, callback };
   }, [data.shift_activity]);
 
   if (loading) {
@@ -520,8 +520,8 @@ export default function TeleDashboardPage() {
       <div className="grid gap-4 xl:grid-cols-2">
         <SectionCard title="My KPI Today">
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-            <MiniStat label="Calls Today" value={data.summary.calls_today} />
             <MiniStat label="KPI Today" value={data.kpi.kpi_today} />
+            <MiniStat label="Calls Today" value={data.summary.calls_today} />
             <MiniStat label="Done Today" value={data.summary.done_today} />
             <MiniStat label="Invalid Today" value={data.summary.invalid_today} />
             <MiniStat label="Callback Today" value={data.summary.callback_today} />
@@ -548,7 +548,7 @@ export default function TeleDashboardPage() {
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
-        <SectionCard title="My Campaign KPI">
+        <SectionCard title="My Campaign Activity">
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
             <MiniStat label="KPI Total" value={data.kpi.kpi_total} />
             <MiniStat label="Total Calls" value={data.summary.total_calls} />
@@ -607,7 +607,7 @@ export default function TeleDashboardPage() {
                   <div className="mb-2 flex items-center justify-between text-sm">
                     <span className="font-medium">{row.date_label}</span>
                     <span className="opacity-70">
-                      {row.calls} calls • {row.kpi} KPI • {row.done} done • {row.terminal} terminal
+                      {row.calls} calls • {row.done} done • {row.kpi} KPI
                     </span>
                   </div>
 
@@ -618,18 +618,13 @@ export default function TeleDashboardPage() {
                     </div>
 
                     <div>
-                      <div className="mb-1 text-[11px] opacity-60">KPI</div>
-                      <TrendBar value={row.kpi} max={weeklyMax} />
-                    </div>
-
-                    <div>
                       <div className="mb-1 text-[11px] opacity-60">Done</div>
                       <TrendBar value={row.done} max={weeklyMax} />
                     </div>
 
                     <div>
-                      <div className="mb-1 text-[11px] opacity-60">Terminal</div>
-                      <TrendBar value={row.terminal} max={weeklyMax} />
+                      <div className="mb-1 text-[11px] opacity-60">KPI</div>
+                      <TrendBar value={row.kpi} max={weeklyMax} />
                     </div>
                   </div>
                 </div>
@@ -653,6 +648,8 @@ export default function TeleDashboardPage() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="ALL">All</SelectItem>
+                  <SelectItem value="KPI">KPI</SelectItem>
+                  <SelectItem value="NON_KPI">Non-KPI</SelectItem>
                   <SelectItem value="DONE">DONE</SelectItem>
                   <SelectItem value="INVALID">INVALID</SelectItem>
                   <SelectItem value="CALLBACK">CALLBACK</SelectItem>
@@ -660,25 +657,9 @@ export default function TeleDashboardPage() {
               </Select>
             </div>
 
-            <div className="w-[150px]">
-              <Select
-                value={kpiFilter}
-                onValueChange={(v) => setKpiFilter(v as KpiFilter)}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="KPI filter" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="ALL">All</SelectItem>
-                  <SelectItem value="KPI_ONLY">KPI only</SelectItem>
-                  <SelectItem value="NON_KPI">Non-KPI</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
             <div className="w-[240px]">
               <Input
-                placeholder="Search name / company / phone / note..."
+                placeholder="Search name / company / phone / group / detail / note..."
                 value={activityKeyword}
                 onChange={(e) => setActivityKeyword(e.target.value)}
               />
@@ -686,9 +667,10 @@ export default function TeleDashboardPage() {
           </div>
         }
       >
-        <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-6">
+        <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-7">
           <MiniStat label="All" value={activityCountSummary.all} />
-          <MiniStat label="KPI Eligible" value={activityCountSummary.kpiEligible} />
+          <MiniStat label="KPI" value={activityCountSummary.kpi} />
+          <MiniStat label="Non-KPI" value={activityCountSummary.nonKpi} />
           <MiniStat label="DONE" value={activityCountSummary.done} />
           <MiniStat label="INVALID" value={activityCountSummary.invalid} />
           <MiniStat label="CALLBACK" value={activityCountSummary.callback} />
@@ -703,8 +685,11 @@ export default function TeleDashboardPage() {
               <div key={item.call_log_id} className="rounded-xl border p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-sm font-semibold">
-                      {item.customer_name ?? "Unknown"}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="text-sm font-semibold">
+                        {item.customer_name ?? "Unknown"}
+                      </div>
+                      {kpiBadge(item.is_kpi_eligible)}
                     </div>
 
                     <div className="mt-1 text-xs text-muted-foreground">
@@ -718,14 +703,7 @@ export default function TeleDashboardPage() {
                     <div className="mt-1 text-xs opacity-70">{fmtDT(item.called_at)}</div>
                   </div>
 
-                  <div className="flex flex-col items-end gap-2">
-                    <div>{finalStatusBadge(item.final_status)}</div>
-                    {item.is_kpi_eligible ? (
-                      <Badge variant="outline">KPI</Badge>
-                    ) : (
-                      <Badge variant="secondary">Non-KPI</Badge>
-                    )}
-                  </div>
+                  <div>{finalStatusBadge(item.final_status)}</div>
                 </div>
 
                 <div className="mt-2 text-sm opacity-80">

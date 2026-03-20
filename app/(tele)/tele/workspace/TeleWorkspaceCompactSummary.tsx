@@ -35,6 +35,10 @@ const EMPTY_DATA: TeleDashboardData = {
     conversion_rate: 0,
     last_call_at: null,
   },
+  kpi: {
+    kpi_today: 0,
+    kpi_total: 0,
+  },
   queue: {
     assigned_count: 0,
     active_holding: 0,
@@ -85,10 +89,6 @@ const EMPTY_DATA: TeleDashboardData = {
     avg_conversion_rate: 0,
   },
   weekly_trend: [],
-  kpi: {
-    kpi_today: 0,
-    kpi_total: 0,
-  },
 };
 
 function Chip(props: { label: string; value: number | string }) {
@@ -197,7 +197,7 @@ export default function TeleWorkspaceCompactSummary({ refreshToken = 0 }: Props)
           </div>
         </div>
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-7">
           <Chip label="Current Shift" value={data.shift.current_shift_label} />
           <Chip
             label="Current Shift KPI"
@@ -211,8 +211,9 @@ export default function TeleWorkspaceCompactSummary({ refreshToken = 0 }: Props)
             label="Current Shift %"
             value={data.shift.shift_active ? pct(data.shift_progress.current_shift_progress_pct) : "—"}
           />
-          <Chip label="Day KPI" value={`${data.shift_progress.day_processed}/${data.shift_progress.day_target}`} />
+          <Chip label="Day KPI" value={`${data.kpi.kpi_today}/${data.shift_progress.day_target}`} />
           <Chip label="Day %" value={pct(data.shift_progress.day_progress_pct)} />
+          <Chip label="KPI Total" value={data.kpi.kpi_total} />
           <Chip label="Overdue Callback" value={data.queue.overdue_callbacks} />
         </div>
 

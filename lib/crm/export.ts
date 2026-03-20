@@ -2,7 +2,7 @@ import * as XLSX from "xlsx";
 
 /*
 ====================================================
-CSV EXPORT (giữ nguyên)
+CSV EXPORT
 ====================================================
 */
 
@@ -57,19 +57,28 @@ FETCH PAGINATION (Supabase safe)
 
 export async function fetchAllByRange<T>(
   fetchPage: (from: number, to: number) => Promise<T[]>,
-  pageSize = 5000
+  pageSize = 1000
 ): Promise<T[]> {
-  const out: T[] = [];
+  if (!Number.isFinite(pageSize) || pageSize <= 0) {
+    throw new Error("fetchAllByRange: pageSize must be > 0");
+  }
 
+  const out: T[] = [];
   let from = 0;
 
   while (true) {
     const to = from + pageSize - 1;
-
     const page = await fetchPage(from, to);
+
+    if (!Array.isArray(page)) {
+      throw new Error("fetchAllByRange: fetchPage must return an array");
+    }
+
+    if (page.length === 0) break;
 
     out.push(...page);
 
+    // Nếu page cuối nhỏ hơn pageSize => đã hết dữ liệu
     if (page.length < pageSize) break;
 
     from += pageSize;
@@ -80,7 +89,7 @@ export async function fetchAllByRange<T>(
 
 /*
 ====================================================
-ENTERPRISE XLSX EXPORT
+XLSX EXPORT
 ====================================================
 */
 
@@ -118,19 +127,7 @@ export function downloadWorkbookXlsx(
       header: headers,
     });
 
-    /*
-    =========================
-    Freeze header row
-    =========================
-    */
-
     ws["!freeze"] = { xSplit: 0, ySplit: 1 };
-
-    /*
-    =========================
-    Auto filter
-    =========================
-    */
 
     ws["!autofilter"] = {
       ref: XLSX.utils.encode_range({
@@ -139,26 +136,14 @@ export function downloadWorkbookXlsx(
       }),
     };
 
-    /*
-    =========================
-    Auto column width
-    =========================
-    */
-
     ws["!cols"] = autoColumnWidth(normalized, headers);
 
     XLSX.utils.book_append_sheet(
       wb,
       ws,
-      sheet.name.slice(0, 31) // Excel sheet name limit
+      sheet.name.slice(0, 31)
     );
   }
-
-  /*
-  =========================
-  Workbook metadata
-  =========================
-  */
 
   wb.Props = {
     Title: "Campaign Export",
@@ -166,6 +151,9 @@ export function downloadWorkbookXlsx(
     CreatedDate: new Date(),
   };
 
-  const finalName = filename.toLowerCase().endsWith(".xlsx") ? filename : `${filename}.xlsx`;
+  const finalName = filename.toLowerCase().endsWith(".xlsx")
+    ? filename
+    : `${filename}.xlsx`;
+
   XLSX.writeFile(wb, finalName);
 }

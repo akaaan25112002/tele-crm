@@ -11,6 +11,7 @@ import { clamp } from "../lib/utils";
 function fmt(n: number) {
   return Number.isFinite(n) ? n.toLocaleString() : "0";
 }
+
 function pct(n: number) {
   return `${clamp(Math.round(n), 0, 100)}%`;
 }
@@ -61,17 +62,42 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
     const hasWork = inProgress > 0;
 
     const headline = (() => {
-      if (canComplete) return { tone: "ok" as const, text: "✅ All contacts are terminal. You can mark campaign as COMPLETED/DONE." };
-      if (isBlocked) return { tone: "warn" as const, text: "⚠ Queue blocked: all remaining contacts are LOCKED (0 available)." };
-      if (hasWork && available > 0) return { tone: "ok" as const, text: `✅ ${fmt(available)} contacts available to call now.` };
-      if (total === 0) return { tone: "muted" as const, text: "No contacts loaded yet." };
-      return { tone: "muted" as const, text: "Campaign is running." };
+      if (canComplete) {
+        return {
+          tone: "ok" as const,
+          text: "✅ All contacts are terminal. You can mark campaign as COMPLETED/DONE.",
+        };
+      }
+      if (isBlocked) {
+        return {
+          tone: "warn" as const,
+          text: "⚠ Queue blocked: all remaining contacts are LOCKED (0 available).",
+        };
+      }
+      if (hasWork && available > 0) {
+        return {
+          tone: "ok" as const,
+          text: `✅ ${fmt(available)} contacts available to call now.`,
+        };
+      }
+      if (total === 0) {
+        return {
+          tone: "muted" as const,
+          text: "No contacts loaded yet.",
+        };
+      }
+      return {
+        tone: "muted" as const,
+        text: "Campaign is running.",
+      };
     })();
 
     const importMsg = (() => {
       if (importOk) return null;
       if (declared === 0) return null;
-      if (importDelta > 0) return `⚠ Imported fewer than declared: missing ${fmt(importDelta)} rows.`;
+      if (importDelta > 0) {
+        return `⚠ Imported fewer than declared: missing ${fmt(importDelta)} rows.`;
+      }
       return `⚠ Imported more than declared: extra ${fmt(Math.abs(importDelta))} rows.`;
     })();
 
@@ -92,7 +118,6 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
     };
   }, [u.total_rows, k]);
 
-  // ===== Sheet headers (Excel columns order)
   const CONTACT_HEADERS = [
     "Person ID",
     "Company Info",
@@ -111,7 +136,6 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
     "State",
     "Registered Event",
     "Visited Event",
-
     "Current Status",
     "Assigned Tele ID",
     "Assigned Tele Name",
@@ -120,7 +144,6 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
     "Call Attempts",
     "Last Action At",
     "Updated At",
-
     "Total Calls",
     "First Call At",
     "Last Call At",
@@ -133,7 +156,6 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
     "Last Result Is Terminal",
     "Last Caller ID",
     "Last Caller Name",
-
     "Edited Fields Count",
     "Last Edited At",
     "Last Edited By ID",
@@ -146,7 +168,6 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
     "Next Call At",
     "Note",
     "Campaign Name",
-
     "Person ID",
     "Company Name",
     "Given Name",
@@ -154,15 +175,12 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
     "Telephone Number",
     "Mobile Number",
     "Email",
-
     "Tele ID",
     "Tele Name",
-
     "Result Group",
     "Result Detail",
     "Final Status",
     "Is Terminal",
-
     "Contact Current Status",
   ] as const;
 
@@ -170,7 +188,6 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
     "Edited At",
     "Edited By ID",
     "Edited By Name",
-
     "Person ID",
     "Company Name",
     "Given Name",
@@ -178,7 +195,6 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
     "Telephone Number",
     "Mobile Number",
     "Email",
-
     "Field",
     "Old Value",
     "New Value",
@@ -186,47 +202,58 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
 
   const exportExcel3Sheets = async () => {
     setExportingExcel(true);
+
     try {
       // 1) Contacts
       const contactsRaw = await fetchAllByRange<any>(async (from, to) => {
         const { data, error } = await supabase
-          .from("v_contacts_export_enriched") // ✅ dùng view export-ready (đã có edit details / last call / etc)
+          .from("v_contacts_export_enriched")
           .select("*")
           .eq("upload_id", vm.uploadId)
+          .order("contact_id", { ascending: true })
           .range(from, to);
+
         if (error) throw error;
         return (data as any[]) ?? [];
-      }, 5000);
+      }, 1000);
 
       const contacts = normalizeByHeaders(contactsRaw, CONTACT_HEADERS);
 
-      // 2) Logs
+      // 2) Call Logs
+      // Yêu cầu view đã có call_log_id để pagination deterministic
       const logsRaw = await fetchAllByRange<any>(async (from, to) => {
         const { data, error } = await supabase
           .from("v_call_logs_export2")
           .select("*")
           .eq("upload_id", vm.uploadId)
+          .order("call_log_id", { ascending: true })
           .range(from, to);
+
         if (error) throw error;
         return (data as any[]) ?? [];
-      }, 5000);
+      }, 1000);
 
       const logs = normalizeByHeaders(logsRaw, LOG_HEADERS);
 
       // 3) Edit History
+      // Yêu cầu view đã có edit_id để pagination deterministic
       const editsRaw = await fetchAllByRange<any>(async (from, to) => {
         const { data, error } = await supabase
           .from("v_contact_edits_export2")
           .select("*")
           .eq("upload_id", vm.uploadId)
+          .order("edit_id", { ascending: true })
           .range(from, to);
+
         if (error) throw error;
         return (data as any[]) ?? [];
-      }, 5000);
+      }, 1000);
 
       const edits = normalizeByHeaders(editsRaw, EDIT_HEADERS);
 
-      const base = safeFileBaseName(`${u.campaign_name ?? "campaign"}_${new Date().toISOString().slice(0, 10)}`);
+      const base = safeFileBaseName(
+        `${u.campaign_name ?? "campaign"}_${new Date().toISOString().slice(0, 10)}`
+      );
       const filename = `${base}_EXPORT.xlsx`;
 
       downloadWorkbookXlsx(filename, [
@@ -236,6 +263,7 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
       ]);
     } catch (e: any) {
       alert(e?.message ?? "Export Excel failed");
+      console.error("Export Excel failed:", e);
     } finally {
       setExportingExcel(false);
     }
@@ -248,7 +276,9 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
       <CardContent className="space-y-4 pt-6">
         <div className="rounded-lg border p-3 text-sm bg-muted/20">
           <div className="font-medium">{derived.headline.text}</div>
-          {derived.importMsg ? <div className="mt-1 text-xs opacity-70">{derived.importMsg}</div> : null}
+          {derived.importMsg ? (
+            <div className="mt-1 text-xs opacity-70">{derived.importMsg}</div>
+          ) : null}
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -280,10 +310,13 @@ export default function CampaignKpis({ vm }: { vm: UploadDetailVM }) {
         </div>
 
         <div className="h-2 w-full rounded-full bg-muted">
-          <div className="h-2 rounded-full bg-foreground" style={{ width: progressBarWidth }} />
+          <div
+            className="h-2 rounded-full bg-foreground"
+            style={{ width: progressBarWidth }}
+          />
         </div>
 
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-t pt-4">
+        <div className="flex flex-col gap-2 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-xs opacity-70">
             Export 1 Excel file with 3 sheets (Contacts / Call Logs / Edit History).
           </div>
